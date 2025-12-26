@@ -4,7 +4,7 @@ Several league enhancements
 
 ## Install
 
-Install from here : https://github.com/aruuush/several-leagues/raw/refs/heads/main/several_leagues.user.js
+Install from here : https://raw.githubusercontent.com/aruuush/several-leagues/main/several_leagues.user.js
 
 You need [TamperMonkey](https://www.tampermonkey.net) or a similar browser extension.
 
