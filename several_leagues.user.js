@@ -2,7 +2,7 @@
 // @name         Several Leagues
 // @namespace    hh-several-leagues
 // @version      4.0.0
-// @author       aruuush
+// @author       arush
 // @description  Several League enhancements: star players, filter by star, local booster expiration time, sort by booster expiration, disable accidental 3x battle clicks, sort persistence
 // @match        *://*.hentaiheroes.com/*leagues.html*
 // @match        *://*.haremheroes.com/*leagues.html*
