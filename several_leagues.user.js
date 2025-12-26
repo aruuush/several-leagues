@@ -602,7 +602,7 @@
             disableMultiBattleButton:
                 { enabled: true },
             restoreSortState:
-                { enabled: false },
+                { enabled: true },
         };
 
         // changing config requires HH++
@@ -694,7 +694,7 @@
             configSchema: {
                 baseKey: 'restoreSortState',
                 label: 'Makes sort by booster expiration persistent across page reloads',
-                default: false,
+                default: true,
             },
             run() {
                 config.restoreSortState = {
