@@ -7,6 +7,8 @@
 // @match        *://*.haremheroes.com/*leagues.html*
 // @match        *://*.hentaiheroes.com/*home.html*
 // @match        *://*.haremheroes.com/*home.html*
+// @downloadURL  https://github.com/aruuush/several-leagues/blob/main/several_leagues.user.js
+// @updateURL    https://github.com/aruuush/several-leagues/blob/main/several_leagues.user.js
 // @icon         https://cdn3.iconfinder.com/data/icons/sex-6/128/XXX_3-02-512.png
 // @run-at       document-idle
 // @grant        unsafeWindow
