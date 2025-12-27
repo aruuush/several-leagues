@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.0.1
+// @version      4.0.2
 // @author       arush
 // @description  Several League enhancements: star players, filter by star, local booster expiration time, sort by booster expiration, disable accidental 3x battle clicks, sort persistence
 // @match        *://*.hentaiheroes.com/*leagues.html*
@@ -416,7 +416,7 @@
                 });
             });
 
-            console.log(`✅ Sorted by booster expiration (${desc ? 'latest → earliest' : 'earliest → latest'})`);
+            console.log(`[Several Leagues] ✅ Sorted by booster expiration (${desc ? 'latest → earliest' : 'earliest → latest'})`);
         };
 
         // Hook up the header click (two-state toggle)
@@ -524,11 +524,11 @@
                                 updateBtnStyle(btn);
                             }, 3000);
 
-                            console.log('⚡ MultiBattle button armed. Click again to start!');
+                            console.log('[Several Leagues] ⚡ MultiBattle button armed. Click again to start!');
                         } else {
                             // Second click → let the game handle normally
                             multiBattleArmed = false;
-                            console.log('🚀 MultiBattle button clicked!');
+                            console.log('[Several Leagues] 🚀 MultiBattle button clicked!');
                         }
                     }, true);
                 }
@@ -585,7 +585,7 @@
                 }));
             }
 
-            console.log(`✅ Sorted by ${column} (${direction})`);
+            console.log(`[Several Leagues] ✅ Sorted by ${column} (${direction})`);
         });
     }
 
@@ -711,11 +711,11 @@
     }
 
     if (!unsafeWindow['hhPlusPlusConfig']) {
-        console.log(`waiting for HHPlusPlus`);
-        $(document).one('hh++-bdsm:loaded', () => {
-            console.log('HHPlusPlus ready, restart script');
+        console.log(`[Several Leagues] waiting for HHPlusPlus`);
+        document.addEventListener('hh++-bdsm:loaded', () => {
+            console.log('[Several Leagues] HHPlusPlus ready, restart script');
             severalLeagues();
-        });
+        }, { once: true });
         return;
     }
 
