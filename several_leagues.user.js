@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.0.2
+// @version      4.0.3
 // @author       arush
 // @description  Several League enhancements: star players, filter by star, local booster expiration time, sort by booster expiration, disable accidental 3x battle clicks, sort persistence
 // @match        *://*.hentaiheroes.com/*leagues.html*
@@ -16,7 +16,41 @@
 // @grant        GM_info
 // ==/UserScript==
 
-(async function severalLeagues() {
+if (unsafeWindow.__severalLeaguesInitialized) {
+    console.log('[Several Leagues] already initialized, skipping');
+    return;
+}
+unsafeWindow.__severalLeaguesInitialized = true;
+
+function waitForHHPlusPlus(cb) {
+    if (unsafeWindow.hhPlusPlusConfig) {
+        console.log('[Several Leagues] HH++ already loaded');
+        cb();
+        return;
+    }
+
+    console.log('[Several Leagues] waiting for HHPlusPlus');
+
+    let done = false;
+
+    const finish = () => {
+        if (done) return;
+        done = true;
+        console.log('[Several Leagues] HH++ detected');
+        cb();
+    };
+
+    document.addEventListener('hh++-bdsm:loaded', finish, { once: true });
+
+    const poll = setInterval(() => {
+        if (unsafeWindow.hhPlusPlusConfig) {
+            clearInterval(poll);
+            finish();
+        }
+    }, 10);
+}
+
+async function severalLeagues() {
     'use strict';
 
     const STORAGE_KEY = 'hh_league_starred_players';
@@ -710,15 +744,6 @@
         return config;
     }
 
-    if (!unsafeWindow['hhPlusPlusConfig']) {
-        console.log(`[Several Leagues] waiting for HHPlusPlus`);
-        document.addEventListener('hh++-bdsm:loaded', () => {
-            console.log('[Several Leagues] HHPlusPlus ready, restart script');
-            severalLeagues();
-        }, { once: true });
-        return;
-    }
-
     const {
         HHPlusPlus: {
             Helpers: {
@@ -765,4 +790,8 @@
             subtree: true
         });
     }
-})();
+}
+
+waitForHHPlusPlus(() => {
+    severalLeagues();
+});
