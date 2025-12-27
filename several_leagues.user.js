@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.0.0
+// @version      4.0.1
 // @author       arush
 // @description  Several League enhancements: star players, filter by star, local booster expiration time, sort by booster expiration, disable accidental 3x battle clicks, sort persistence
 // @match        *://*.hentaiheroes.com/*leagues.html*
@@ -711,9 +711,9 @@
     }
 
     if (!unsafeWindow['hhPlusPlusConfig']) {
-        log(`waiting for HHPlusPlus`);
+        console.log(`waiting for HHPlusPlus`);
         $(document).one('hh++-bdsm:loaded', () => {
-            log('HHPlusPlus ready, restart script');
+            console.log('HHPlusPlus ready, restart script');
             severalLeagues();
         });
         return;
