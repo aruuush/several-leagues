@@ -1,19 +1,36 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.0.3
+// @version      4.1.0
 // @author       arush
-// @description  Several League enhancements: star players, filter by star, local booster expiration time, sort by booster expiration, disable accidental 3x battle clicks, sort persistence
+// @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
 // @match        *://*.haremheroes.com/*leagues.html*
+// @match        *://*.gayharem.com/*leagues.html*
+// @match        *://*.comixharem.com/*leagues.html*
+// @match        *://*.hornyheroes.com/*leagues.html*
+// @match        *://*.pornstarharem.com/*leagues.html*
+// @match        *://*.transpornstarharem.com/*leagues.html*
+// @match        *://*.gaypornstarharem.com/*leagues.html*
+// @match        *://*.mangarpg.com/*leagues.html*
 // @match        *://*.hentaiheroes.com/*home.html*
 // @match        *://*.haremheroes.com/*home.html*
+// @match        *://*.gayharem.com/*home.html*
+// @match        *://*.comixharem.com/*home.html*
+// @match        *://*.hornyheroes.com/*home.html*
+// @match        *://*.pornstarharem.com/*home.html*
+// @match        *://*.transpornstarharem.com/*home.html*
+// @match        *://*.gaypornstarharem.com/*home.html*
+// @match        *://*.mangarpg.com/*home.html*
 // @downloadURL  https://raw.githubusercontent.com/aruuush/several-leagues/main/several_leagues.user.js
 // @updateURL    https://raw.githubusercontent.com/aruuush/several-leagues/main/several_leagues.user.js
 // @icon         https://cdn3.iconfinder.com/data/icons/sex-6/128/XXX_3-02-512.png
 // @run-at       document-idle
 // @grant        unsafeWindow
 // @grant        GM_info
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
 // ==/UserScript==
 
 if (unsafeWindow.__severalLeaguesInitialized) {
@@ -53,16 +70,26 @@ function waitForHHPlusPlus(cb) {
 async function severalLeagues() {
     'use strict';
 
-    const STORAGE_KEY = 'hh_league_starred_players';
+    const STARRED_KEY = 'hh_league_starred_players';
     const FILTER_MODE_KEY = 'hh_league_star_filter_mode';
     const SORT_KEY = 'hh_league_sort_state';
+    const INSTABOOSTER_KEY = 'hh_league_instabooster_config';
+    const HISTORY_KEY = 'hh_league_booster_history';
+
+    const INSTABOOSTER_THRESHOLD_DEFAULT = 10; // seconds
+    const BATCH_GAP_THRESHOLD = 5; // seconds
+    let instaBoosterThreshold = GM_getValue(INSTABOOSTER_KEY, INSTABOOSTER_THRESHOLD_DEFAULT);
+
+    // ------------ Utility ------------
+    const fmt = (ts) =>
+        new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
     // ------------ Star League Players ------------
     function starInit() {
         function loadStarred() {
             try {
-                const raw = localStorage.getItem(STORAGE_KEY);
-                return raw ? new Set(JSON.parse(raw)) : new Set();
+                const raw = GM_getValue(STARRED_KEY, []);
+                return new Set(raw);
             } catch (e) {
                 console.error('Failed to load starred players', e);
                 return new Set();
@@ -71,7 +98,7 @@ async function severalLeagues() {
 
         function saveStarred(set) {
             try {
-                localStorage.setItem(STORAGE_KEY, JSON.stringify([...set]));
+                GM_setValue(STARRED_KEY, [...set]);
             } catch (e) {
                 console.error('Failed to save starred players', e);
             }
@@ -148,7 +175,7 @@ async function severalLeagues() {
                         saveStarred(starredSet);
                         updateStarVisual(starEl, !currentlyStarred);
 
-                        const mode = localStorage.getItem(FILTER_MODE_KEY) || 'all';
+                        const mode = GM_getValue(FILTER_MODE_KEY, 'all');
                         applyModeFilter(starredSet, mode);
                     });
                 }
@@ -231,30 +258,26 @@ async function severalLeagues() {
             filterBox.appendChild(wrapper);
 
             // Load state
-            let mode = localStorage.getItem(FILTER_MODE_KEY) || "all";
+            let mode = GM_getValue(FILTER_MODE_KEY, 'all');
             updateModeButtons();
 
             // Button logic
             btnStar.addEventListener('click', () => {
                 mode = (mode === "starred" ? "all" : "starred");
-                saveMode();
+                GM_setValue(FILTER_MODE_KEY, mode);
                 updateModeButtons();
                 applyModeFilter(starredSet, mode);
             });
 
             btnNonStar.addEventListener('click', () => {
                 mode = (mode === "nonstar" ? "all" : "nonstar");
-                saveMode();
+                GM_setValue(FILTER_MODE_KEY, mode);
                 updateModeButtons();
                 applyModeFilter(starredSet, mode);
             });
 
             // Initial apply
             applyModeFilter(starredSet, mode);
-
-            function saveMode() {
-                localStorage.setItem(FILTER_MODE_KEY, mode);
-            }
 
             function updateModeButtons() {
                 btnStar.style.background = (mode === "starred" ? "#fff8" : "transparent");
@@ -277,7 +300,7 @@ async function severalLeagues() {
         const observer = new MutationObserver(() => {
             decorateRows(starredSet);
 
-            const mode = localStorage.getItem(FILTER_MODE_KEY) || "all";
+            const mode = GM_getValue(FILTER_MODE_KEY, 'all');
             applyModeFilter(starredSet, mode);
         });
 
@@ -285,59 +308,244 @@ async function severalLeagues() {
         observer.observe(target, { childList: true, subtree: true });
     }
 
-    // ------------ Local Booster Expiration timer ------------
-    function localBoosterExpirationInit() {
-        function replaceItemPrice(tooltip, timeText) {
-            doWhenSelectorAvailable('.item-price', () => {
-                const priceEl = tooltip.querySelector('.item-price');
-                if (!priceEl) return false;
-
-                priceEl.innerHTML = '';
-                priceEl.style.textAlign = 'center';
-                priceEl.style.fontSize = '12px';
-                priceEl.style.color = '#ffbf00ff';
-                priceEl.style.textShadow = '1px 1px 2px #000';
-                priceEl.textContent = `Ends at ${timeText}`;
-                return true;
-            });
-        }
-
-        function buildBoosterExpiryMap() {
-            const l = opponents_list;
-            if (!Array.isArray(l)) return;
-
-            // Global map: id_member → array of booster objects { id_member_booster_equipped, lifetime }
-            window.boosterExpiries = new Map();
-
-            for (let i = 0; i < l.length; i++) {
-                const opp = l[i];
-                const id = opp.player.id_fighter;
-                const boosters = opp.boosters || [];
-                if (boosters.length === 0) continue;
-
-                // Convert all boosters → { id_member_booster_equipped, lifetime }
-                const boosterObjs = [];
-                for (let j = 0; j < boosters.length; j++) {
-                    const booster = boosters[j];
-                    if (!booster || !booster.lifetime || !booster.id_member_booster_equipped) continue;
-
-                    const exp = Number(booster.lifetime);
-                    if (!Number.isFinite(exp)) continue;
-
-                    boosterObjs.push({
-                        id_member_booster_equipped: booster.id_member_booster_equipped,
-                        lifetime: exp
-                    });
-                }
-
-                if (boosterObjs.length) {
-                    window.boosterExpiries.set(id, boosterObjs);
-                }
+    // ------------ Build Booster Map and InstaBooster Detection ------------
+    function buildBoosterExpiryMap(CONFIG) {
+        function loadHistory() {
+            const data = GM_getValue(HISTORY_KEY, {});
+            const currentLeagueKey = server_now_ts + season_end_at;
+            if (!data) return { leagueKey: currentLeagueKey, history: {} };
+            try {
+                if (data.leagueKey !== currentLeagueKey) return { leagueKey: currentLeagueKey, history: {} };
+                return data;
+            } catch {
+                return { leagueKey: currentLeagueKey, history: {} };
             }
         }
 
-        buildBoosterExpiryMap();
+        function saveHistory(data) {
+            GM_setValue(HISTORY_KEY, data);
+        }
 
+        const l = opponents_list;
+        if (!Array.isArray(l)) return;
+
+        const historyData = loadHistory();
+        window.boosterExpiries = new Map();
+        const instaPlayers = [];
+
+        for (let i = 0; i < l.length; i++) {
+            const opp = l[i];
+            const id = opp.player.id_fighter;
+            const boosters = opp.boosters || [];
+            if (!boosters.length) continue;
+
+            // Prepare current boosters
+            const boosterObjs = boosters
+                .filter(b => b && b.lifetime && b.id_member_booster_equipped)
+                .map(b => ({
+                    id_member_booster_equipped: b.id_member_booster_equipped,
+                    lifetime: Number(b.lifetime)
+                }))
+                .filter(b => Number.isFinite(b.lifetime))
+                .sort((a, b) => a.lifetime - b.lifetime);
+
+            if (!boosterObjs.length) continue;
+
+            // Group current boosters into batches (<=10s difference)
+            const batches = [];
+            let currentBatch = [];
+            for (let j = 0; j < boosterObjs.length; j++) {
+                const b = boosterObjs[j];
+                if (!currentBatch.length || b.lifetime - currentBatch[currentBatch.length - 1].lifetime <= BATCH_GAP_THRESHOLD) {
+                    currentBatch.push(b);
+                } else {
+                    batches.push(currentBatch);
+                    currentBatch = [b];
+                }
+            }
+            if (currentBatch.length) batches.push(currentBatch);
+
+            // Get last 4 historical batches (expired only)
+            const playerHistory = historyData.history[id] || [];
+
+            // Take last 4 expired batches from history
+            const now = server_now_ts;
+            const expiredBatches = playerHistory
+                .filter(batch => batch[batch.length - 1] <= now)
+                .slice(-4);
+
+            let instaFlag = false;
+            if (expiredBatches.length) {
+                for (const expiredBatch of expiredBatches) {
+                    const lastExpiredBatchEnd = expiredBatch[0]; // earliest in the expired batch
+                    for (const batch of batches) {
+                        const batchStart = batch[0].lifetime;
+                        if (batchStart - lastExpiredBatchEnd <= 86400 + instaBoosterThreshold && batchStart - lastExpiredBatchEnd >= 86400) {
+                            instaFlag = true;
+                            break; // insta detected, no need to check further
+                        }
+                    }
+                    if (instaFlag) break;
+                }
+            }
+
+            // Save boosters + insta flag
+            window.boosterExpiries.set(id, { boosters: boosterObjs, insta: instaFlag });
+            if (instaFlag) instaPlayers.push(id);
+
+            // Update history with current batches
+            if (!historyData.history[id]) historyData.history[id] = [];
+            batches.forEach(batch => {
+                const lifetimes = batch.map(b => b.lifetime);
+                // check if batch already exists in history
+                const exists = historyData.history[id].some(h => JSON.stringify(h) === JSON.stringify(lifetimes));
+                if (!exists) {
+                    historyData.history[id].push(lifetimes);
+                }
+            });
+        }
+
+        const leagueKey = server_now_ts + season_end_at;
+
+        // Save history back to GM storage
+        saveHistory({ leagueKey: leagueKey, history: historyData.history });
+
+        window.__instaBoosterCache = {
+            historyData: historyData.history,
+            instaPlayers
+        };
+
+        const remainingPlayers = l
+            .map(opp => opp.player.id_fighter)
+            .filter(id => !instaPlayers.includes(id));
+
+        window.__remainingBoosterPlayers = remainingPlayers;
+
+        // Place ⚠️ icon beside player names
+        if (instaPlayers.length && CONFIG.addInstaBoosterDetection.enabled) {
+            console.log(`[Several Leagues] ⚠️ Detected insta reboosters: ${instaPlayers.join(', ')}`);
+            doWhenSelectorAvailable('.data-row.body-row', () => {
+                applyCautionIcons(historyData.history, instaPlayers, remainingPlayers);
+            });
+        }
+    }
+
+    function applyCautionIcons(historyData, instaPlayers, remainingPlayers) {
+
+        function addCautionIcon(row, playerId, historyData, maxBatches = 8, insta = true) {
+            const playerHistory = historyData[playerId];
+            if (!playerHistory || !playerHistory.length) return;
+
+            const nickCell = row.querySelector('.data-column[column="nickname"]');
+            if (!nickCell || nickCell.querySelector('.hh-caution')) return;
+
+            const icon = document.createElement('span');
+            icon.className = 'hh-caution';
+            icon.textContent = insta ? '⚠️' : 'ℹ️';
+            icon.style.marginLeft = '4px';
+            icon.style.cursor = 'pointer';
+
+            if (!insta) {
+                icon.style.opacity = '0.3';
+            }
+
+            let colors;
+            if (insta) {
+                colors = ['#ff9900', '#ff7300ff', '#ff5f00ff', '#ff5100ff'];
+            } else {
+                colors = ['#70b8ffff', '#629ff9ff', '#3f81fbff', '#2461fdff'];
+            }
+
+            const lastBatches = playerHistory.slice(-maxBatches);
+            const batchTexts = lastBatches.map((batch, index) => {
+                const times = batch.map(ts => fmt(ts)).join(', ');
+                return `<div style="color:${colors[index % colors.length]}; margin-bottom:4px;">
+                    <strong>Batch ${index + 1}:</strong>
+                    <span style="color:${colors[index % colors.length]}; padding-left:10px;">${times}</span>
+                </div>`;
+            });
+
+            const tooltip = document.createElement('div');
+            tooltip.className = 'hh-caution-tooltip';
+            if (insta) {
+                tooltip.innerHTML = `<div style="margin-bottom:6px; color:#ff3300ff; font-size: 1rem;">INSTABOOSTER Detected</div>${batchTexts.join('')}`;
+            } else {
+                tooltip.innerHTML = `<div style="margin-bottom:6px; color:#185affff; font-size: 1rem;">Booster History</div>${batchTexts.join('')}`;
+            }
+            Object.assign(tooltip.style, {
+                position: 'absolute',
+                background: 'rgba(0,0,0,0.9)',
+                padding: '6px 10px',
+                borderRadius: '8px',
+                fontSize: '0.9rem',
+                lineHeight: '1.5',
+                maxWidth: '90vw',      // responsive width
+                wordWrap: 'break-word',// allow wrapping
+                whiteSpace: 'normal',  // allow multiple lines
+                zIndex: 9999,
+                display: 'none',
+                pointerEvents: 'none',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+            });
+
+            document.body.appendChild(tooltip);
+
+            icon.addEventListener('mouseenter', () => {
+                // Temporarily display tooltip to measure size
+                tooltip.style.display = 'block';
+                tooltip.style.visibility = 'hidden';
+                const tooltipWidth = tooltip.offsetWidth;
+                const tooltipHeight = tooltip.offsetHeight;
+                tooltip.style.visibility = 'visible';
+                tooltip.style.display = 'none';
+
+                const rect = icon.getBoundingClientRect();
+                let top = rect.bottom + window.scrollY + 6;
+                let left = rect.left + window.scrollX + rect.width / 2;
+
+                // Horizontal clamp
+                const halfWidth = tooltipWidth / 2;
+                left = Math.max(left, window.scrollX + halfWidth + 8);
+                left = Math.min(left, window.scrollX + window.innerWidth - halfWidth - 8);
+
+                // Vertical clamp: flip above if not enough space
+                if (top + tooltipHeight > window.scrollY + window.innerHeight - 8) {
+                    top = rect.top + window.scrollY - tooltipHeight - 6;
+                }
+
+                // Clamp top to prevent going off the top
+                top = Math.max(top, window.scrollY + 8);
+
+                tooltip.style.top = `${top}px`;
+                tooltip.style.left = `${left}px`;
+                tooltip.style.transform = 'translateX(-50%)';
+                tooltip.style.display = 'block';
+            });
+
+            icon.addEventListener('mouseleave', () => {
+                tooltip.style.display = 'none';
+            });
+
+            nickCell.appendChild(icon);
+        }
+
+        document.querySelectorAll('.data-row.body-row').forEach(row => {
+            const id = Number(
+                row.querySelector('.nickname[id-member]')?.getAttribute('id-member')
+            );
+            if (!id) return;
+
+            if (instaPlayers.includes(id)) {
+                addCautionIcon(row, id, historyData);
+            }
+            else if (remainingPlayers.includes(id)) {
+                addCautionIcon(row, id, historyData, 4, false);
+            }
+        });
+    }
+
+    // ------------ Local Booster Expiration timer ------------
+    function localBoosterExpirationInit() {
         const decodeHTML = (html) => {
             const t = document.createElement('textarea');
             t.innerHTML = html;
@@ -355,9 +563,22 @@ async function severalLeagues() {
             }
         };
 
-        const fmt = (ts) =>
-            new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        function replaceItemPrice(tooltip, timeText) {
+            const priceEl = tooltip.querySelector('.item-price');
+            if (!priceEl) return false;
 
+            priceEl.innerHTML = '';
+            priceEl.style.textAlign = 'center';
+            priceEl.style.fontSize = '12px';
+            priceEl.style.color = '#ffdd55';
+            priceEl.style.textShadow = '1px 1px 2px #000';
+            priceEl.textContent = `Ends at ${timeText}`;
+            return true;
+        }
+
+        // --------------------------
+        // Hover event (local expiry)
+        // --------------------------
         document.body.addEventListener(
             'mouseenter',
             (ev) => {
@@ -370,12 +591,10 @@ async function severalLeagues() {
                 const ownerId = data.id_member;
                 const boosterId = data.id_member_booster_equipped;
 
-                // get all boosters for this owner
-                const boosters = window.boosterExpiries.get(ownerId);
-                if (!boosters || !boosters.length) return;
+                const ownerData = window.boosterExpiries?.get(ownerId);
+                if (!ownerData || !ownerData.boosters || !ownerData.boosters.length) return;
 
-                // find the booster that matches this slot
-                const matchingBooster = boosters.find(b => b.id_member_booster_equipped === boosterId);
+                const matchingBooster = ownerData.boosters.find(b => b.id_member_booster_equipped === boosterId);
                 if (!matchingBooster) return;
 
                 const localTime = fmt(matchingBooster.lifetime);
@@ -417,7 +636,8 @@ async function severalLeagues() {
                 const ownerId = firstSlotData.id_member;
                 if (!ownerId) { row.dataset.expTs = '0'; return 0; }
 
-                const boosterObjs = window.boosterExpiries.get(ownerId) || [];
+                const boosterData = window.boosterExpiries.get(ownerId);
+                const boosterObjs = boosterData?.boosters || [];
                 if (!boosterObjs.length) { row.dataset.expTs = '0'; return 0; }
 
                 // Take the earliest booster lifetime
@@ -471,9 +691,9 @@ async function severalLeagues() {
 
             let desc;
             if (restore_state) {
-                const saved = JSON.parse(localStorage.getItem(SORT_KEY) || '{}');
-                desc = saved.column === 'boosters'
-                    ? saved.direction === 'DESC'
+                const saved = GM_getValue(SORT_KEY, {});
+                desc = saved["column"] === 'boosters'
+                    ? saved["direction"] === 'DESC'
                     : true;
             } else {
                 desc = true;
@@ -489,12 +709,12 @@ async function severalLeagues() {
 
                 // SAVE STATE
                 if (restore_state) {
-                    localStorage.setItem(SORT_KEY, JSON.stringify({
+                    GM_setValue(SORT_KEY, {
                         column: 'boosters',
                         direction: desc ? 'DESC' : 'ASC'
-                    }));
+                    });
                 } else {
-                    localStorage.removeItem(SORT_KEY);
+                    GM_deleteValue(SORT_KEY);
                 }
             });
         };
@@ -509,11 +729,11 @@ async function severalLeagues() {
 
         // Restore boosters sorting on load
         if (restore_state) {
-            const saved = JSON.parse(localStorage.getItem(SORT_KEY) || '{}');
-            if (saved.column === 'boosters') {
+            const saved = GM_getValue(SORT_KEY, {});
+            if (saved["column"] === 'boosters') {
                 requestAnimationFrame(() => {
-                    applyVisualOrder(saved.direction === 'DESC');
-                    icon.className = saved.direction === 'DESC'
+                    applyVisualOrder(saved["direction"] === 'DESC');
+                    icon.className = saved["direction"] === 'DESC'
                         ? 'downArrow_mix_icn'
                         : 'upArrow_mix_icn';
                 });
@@ -613,10 +833,10 @@ async function severalLeagues() {
 
             if (column !== 'boosters') {
                 // SAVE STATE
-                localStorage.setItem(SORT_KEY, JSON.stringify({
+                GM_setValue(SORT_KEY, {
                     column: column,
                     direction: direction === 'DESC' ? 'DESC' : 'ASC'
-                }));
+                });
             }
 
             console.log(`[Several Leagues] ✅ Sorted by ${column} (${direction})`);
@@ -633,6 +853,8 @@ async function severalLeagues() {
                 { enabled: true },
             sortByBoosterExpiration:
                 { enabled: true },
+            addInstaBoosterDetection:
+                { enabled: true, addBoosterInfoForAll: true },
             disableMultiBattleButton:
                 { enabled: true },
             restoreSortState:
@@ -667,7 +889,12 @@ async function severalLeagues() {
             group: 'SeveralLeagues',
             configSchema: {
                 baseKey: 'starLeague',
-                label: 'Star players in leagues and filter them',
+                label: `STAR players and filter
+                        <div style="margin-top:10px; display:flex;flex-direction:column;gap:4px;color:#999DA0;">
+                            <div>- Stars are persistent accross leagues</div>
+                            <div>- Filter is added to HH++ league filter</div>
+                        </div>
+                        `,
                 default: true,
             },
             run() {
@@ -682,7 +909,12 @@ async function severalLeagues() {
             group: 'SeveralLeagues',
             configSchema: {
                 baseKey: 'localBoosterExpiration',
-                label: 'Show local booster expiration time in tooltips (Hover over booster icon to see expiration in local time)',
+                label: `Local Booster Expiration Timer
+                        <div style="margin-top:10px; display:flex;flex-direction:column;gap:4px;color:#999DA0;">
+                            <div>- Shows local time for booster expiration in tooltip</div>
+                            <div>- Hover over booster icon to see local expiration time</div>
+                        </div>
+                        `,
                 default: true,
             },
             run() {
@@ -696,8 +928,54 @@ async function severalLeagues() {
         registerModule({
             group: 'SeveralLeagues',
             configSchema: {
+                baseKey: 'addInstaBoosterDetection',
+                label: `INSTABOOSTER detection <br>
+                        <div style="margin:10px 0px;display:flex;align-items:center;gap:4px;">
+                            <label style="width:70px">Threshold:</label>
+                            <input type="text" id="insta-booster-threshold" style="text-align:center;height:1rem;width:2.5rem">
+                            <span>s</span>
+                        </div>
+                        <div style="margin-top:10px; display:flex;flex-direction:column;gap:4px;color:#999DA0;">
+                            <div>- ⚠️ icon beside player names.</div>
+                            <div>- Hover over icon to see recent booster history.</div>
+                        </div>`,
+                default: true,
+                subSettings: [
+                    { key: 'addBoosterInfoForAll', default: false,
+                        label: 'Add ℹ️ icon for others',
+                    },
+                ],
+            },
+            run(subSettings) {
+                config.addInstaBoosterDetection = {
+                    enabled: true,
+                    addBoosterInfoForAll: subSettings.addBoosterInfoForAll,
+                };
+            },
+        });
+        config.addInstaBoosterDetection.enabled = false;
+
+        doWhenSelectorAvailable('#insta-booster-threshold', () => {
+            const input = document.querySelector('#insta-booster-threshold');
+            let threshold = GM_getValue(INSTABOOSTER_KEY, INSTABOOSTER_THRESHOLD_DEFAULT);
+            input.value = threshold.toString();
+            input.addEventListener('focusout', () => {
+                const inputValue = parseFloat(input.value);
+                threshold = isNaN(inputValue) ? INSTABOOSTER_THRESHOLD_DEFAULT : Math.min(3000, Math.max(0, inputValue));
+                GM_setValue(INSTABOOSTER_KEY, threshold);
+                instaBoosterThreshold = threshold;
+                input.value = threshold.toString();
+            });
+        });
+
+        registerModule({
+            group: 'SeveralLeagues',
+            configSchema: {
                 baseKey: 'sortByBoosterExpiration',
-                label: 'Sort players by booster expiration time (Click header to toggle ascending/descending)',
+                label: `Sort by Booster Expiration
+                        <div style="margin-top:10px; display:flex;flex-direction:column;gap:4px;color:#999DA0;">
+                            <div>- Click on the "Stats and Boosters" column header to sort by booster expiration time.</div>
+                        </div>`,
                 default: true,
             },
             run() {
@@ -712,7 +990,12 @@ async function severalLeagues() {
             group: 'SeveralLeagues',
             configSchema: {
                 baseKey: 'disableMultiBattleButton',
-                label: 'Prevent accidental 3x battle clicks (Click once to enable 3x button and again to fight. Not implemented in pre-battle page.)',
+                label: `2 Click MultiBattle Button
+                        <div style="margin-top:10px; display:flex;flex-direction:column;gap:4px;color:#999DA0;">
+                            <div>- Prevent accidental MultiBattle by requiring two clicks.</div>
+                            <div>- First click arms/unlocks the button, second click initiates the battle.</div>
+                            <div>- Auto disarms/locks after 3 seconds.</div>
+                        </div>`,
                 default: true,
             },
             run() {
@@ -727,7 +1010,7 @@ async function severalLeagues() {
             group: 'SeveralLeagues',
             configSchema: {
                 baseKey: 'restoreSortState',
-                label: 'Makes sort by booster expiration persistent across page reloads',
+                label: `Persistent booster expiration sorting across page reloads`,
                 default: true,
             },
             run() {
@@ -743,6 +1026,37 @@ async function severalLeagues() {
 
         return config;
     }
+
+    // Transfer localStorage to GM storage (one-time)
+    try {
+        const STARRED_VALS = localStorage.getItem(STARRED_KEY);
+        if (STARRED_VALS !== null && STARRED_VALS !== undefined) {
+            GM_setValue(STARRED_KEY, JSON.parse(STARRED_VALS));
+            localStorage.removeItem(STARRED_KEY);
+            console.log('[Several Leagues] Transferred starred players from localStorage to GM storage');
+        }
+        const FILTER_MODE_VAL = localStorage.getItem(FILTER_MODE_KEY);
+        if (FILTER_MODE_VAL !== null && FILTER_MODE_VAL !== undefined) {
+            GM_setValue(FILTER_MODE_KEY, FILTER_MODE_VAL);
+            localStorage.removeItem(FILTER_MODE_KEY);
+            console.log('[Several Leagues] Transferred filter mode from localStorage to GM storage');
+        }
+        const SORT_STATE_VAL = localStorage.getItem(SORT_KEY);
+        if (SORT_STATE_VAL !== null && SORT_STATE_VAL !== undefined) {
+            GM_setValue(SORT_KEY, JSON.parse(SORT_STATE_VAL));
+            localStorage.removeItem(SORT_KEY);
+            console.log('[Several Leagues] Transferred sort state from localStorage to GM storage');
+        }
+        const BOOSTER_HISTORY_VAL = localStorage.getItem('boosterHistory');
+        if (BOOSTER_HISTORY_VAL !== null && BOOSTER_HISTORY_VAL !== undefined) {
+            GM_setValue('boosterHistory', BOOSTER_HISTORY_VAL);
+            localStorage.removeItem('boosterHistory');
+            console.log('[Several Leagues] Transferred booster history from localStorage to GM storage');
+        }
+    } catch (e) {
+        console.error('[Several Leagues] Failed to transfer data from localStorage to GM storage', e);
+    }
+
 
     const {
         HHPlusPlus: {
@@ -765,6 +1079,10 @@ async function severalLeagues() {
 
     if (config.starLeague.enabled) {
         doWhenSelectorAvailable('.data-column.head-column[column="level"]', starInit);
+    }
+
+    if (config.addInstaBoosterDetection.enabled || config.localBoosterExpiration.enabled) {
+        doWhenSelectorAvailable('.data-list .data-row.body-row', () => buildBoosterExpiryMap(config));
     }
 
     if (config.localBoosterExpiration.enabled) {
@@ -790,6 +1108,20 @@ async function severalLeagues() {
             subtree: true
         });
     }
+
+    const cautionObserver = new MutationObserver(() => {
+        if (!window.__instaBoosterCache) return;
+        const { historyData, instaPlayers } = window.__instaBoosterCache;
+        applyCautionIcons(historyData, instaPlayers, window.__remainingBoosterPlayers);
+    });
+
+    doWhenSelectorAvailable('.data-list', () => {
+        const list = document.querySelector('.data-list');
+        cautionObserver.observe(list, {
+            childList: true,
+            subtree: true
+        });
+    });
 }
 
 waitForHHPlusPlus(() => {
