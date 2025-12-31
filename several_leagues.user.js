@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.1.0
+// @version      4.1.1
 // @author       arush
 // @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
@@ -77,7 +77,7 @@ async function severalLeagues() {
     const HISTORY_KEY = 'hh_league_booster_history';
 
     const INSTABOOSTER_THRESHOLD_DEFAULT = 10; // seconds
-    const BATCH_GAP_THRESHOLD = 5; // seconds
+    const BATCH_GAP_THRESHOLD = 10; // seconds
     let instaBoosterThreshold = GM_getValue(INSTABOOSTER_KEY, INSTABOOSTER_THRESHOLD_DEFAULT);
 
     // ------------ Utility ------------
@@ -415,9 +415,12 @@ async function severalLeagues() {
             instaPlayers
         };
 
-        const remainingPlayers = l
-            .map(opp => opp.player.id_fighter)
-            .filter(id => !instaPlayers.includes(id));
+        let remainingPlayers = [];
+        if (CONFIG.addInstaBoosterDetection.addBoosterInfoForAll) {
+            remainingPlayers = l
+                .map(opp => opp.player.id_fighter)
+                .filter(id => !instaPlayers.includes(id));
+        }
 
         window.__remainingBoosterPlayers = remainingPlayers;
 
@@ -1112,7 +1115,9 @@ async function severalLeagues() {
     const cautionObserver = new MutationObserver(() => {
         if (!window.__instaBoosterCache) return;
         const { historyData, instaPlayers } = window.__instaBoosterCache;
-        applyCautionIcons(historyData, instaPlayers, window.__remainingBoosterPlayers);
+        if (config.addInstaBoosterDetection.addBoosterInfoForAll) {
+            applyCautionIcons(historyData, instaPlayers, window.__remainingBoosterPlayers);
+        }
     });
 
     doWhenSelectorAvailable('.data-list', () => {
