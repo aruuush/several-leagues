@@ -343,8 +343,10 @@ async function severalLeagues() {
             if (!data) return { leagueKey: currentLeagueKey, history: {} };
             try {
                 if (data.leagueKey !== currentLeagueKey) return { leagueKey: currentLeagueKey, history: {} };
+                GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []); // reset insta boosted players for new league
                 return data;
             } catch {
+                GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []);
                 return { leagueKey: currentLeagueKey, history: {} };
             }
         }
@@ -489,7 +491,7 @@ async function severalLeagues() {
             }
 
             let colors;
-            if (insta) {
+            if (insta || oldInsta) {
                 colors = ['#ff9900', '#ff7300ff', '#ff5f00ff', '#ff5100ff'];
             } else {
                 colors = ['#70b8ffff', '#629ff9ff', '#3f81fbff', '#2461fdff'];
