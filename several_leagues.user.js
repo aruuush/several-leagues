@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.2.1
+// @version      4.2.2
 // @author       arush
 // @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
@@ -342,8 +342,10 @@ async function severalLeagues() {
             const currentLeagueKey = server_now_ts + season_end_at;
             if (!data) return { leagueKey: currentLeagueKey, history: {} };
             try {
-                if (data.leagueKey !== currentLeagueKey) return { leagueKey: currentLeagueKey, history: {} };
-                GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []); // reset insta boosted players for new league
+                if (data.leagueKey !== currentLeagueKey) {
+                    GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []);
+                    return { leagueKey: currentLeagueKey, history: {} };
+                }
                 return data;
             } catch {
                 GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []);
