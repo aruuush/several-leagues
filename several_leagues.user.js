@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.1.2
+// @version      4.2.0
 // @author       arush
 // @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
@@ -67,14 +67,41 @@ function waitForHHPlusPlus(cb) {
     }, 10);
 }
 
+const SITE_SUFFIX_TO_PREFIX = [
+    ['hentaiheroes.com', 'hh'],
+    ['haremheroes.com', 'hh'],
+    ['gayharem.com', 'gh'],
+    ['comixharem.com', 'ch'],
+    ['hornyheroes.com', 'hoh'],
+    ['pornstarharem.com', 'psh'],
+    ['transpornstarharem.com', 'tpsh'],
+    ['gaypornstarharem.com', 'gpsh'],
+    ['mangarpg.com', 'mrpg']
+];
+
+function resolvePrefix() {
+    const host = location.hostname.toLowerCase();
+
+    for (const [suffix, prefix] of SITE_SUFFIX_TO_PREFIX) {
+        if (host === suffix || host.includes(`.${suffix}`)) {
+            return prefix;
+        }
+    }
+
+    return 'hh'; // safe fallback
+}
+
 async function severalLeagues() {
     'use strict';
 
-    const STARRED_KEY = 'hh_league_starred_players';
-    const FILTER_MODE_KEY = 'hh_league_star_filter_mode';
-    const SORT_KEY = 'hh_league_sort_state';
-    const INSTABOOSTER_KEY = 'hh_league_instabooster_config';
-    const HISTORY_KEY = 'hh_league_booster_history';
+    const prefix = resolvePrefix();
+
+    const STARRED_KEY = `${prefix}_league_starred_players`;
+    const FILTER_MODE_KEY = `${prefix}_league_star_filter_mode`;
+    const SORT_KEY = `${prefix}_league_sort_state`;
+    const INSTABOOSTER_KEY = `${prefix}_league_instabooster_config`;
+    const INSTABOOSTER_PLAYER_HISTORY_KEY = `${prefix}_league_instaboosted_players`;
+    const HISTORY_KEY = `${prefix}_league_booster_history`;
 
     const INSTABOOSTER_THRESHOLD_DEFAULT = 10; // seconds
     const BATCH_GAP_THRESHOLD = 10; // seconds
@@ -332,6 +359,7 @@ async function severalLeagues() {
         const historyData = loadHistory();
         window.boosterExpiries = new Map();
         const instaPlayers = [];
+        const instaBoostedHistory = GM_getValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []);
 
         for (let i = 0; i < l.length; i++) {
             const opp = l[i];
@@ -415,11 +443,19 @@ async function severalLeagues() {
             instaPlayers
         };
 
+        // Remove players from current insta boosted list if they no longer insta boost
+        const oldInstaBoosters = instaBoostedHistory.filter(id => !instaPlayers.includes(id));
+        window.__oldInstaBoosters = oldInstaBoosters;
+        
+        // Add new insta boosters to history
+        const combinedInstaBoosters = [...new Set(oldInstaBoosters.concat(instaPlayers))];
+        GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, combinedInstaBoosters);
+
         let remainingPlayers = [];
         if (CONFIG.addInstaBoosterDetection.addBoosterInfoForAll) {
             remainingPlayers = l
                 .map(opp => opp.player.id_fighter)
-                .filter(id => !instaPlayers.includes(id));
+                .filter(id => !instaPlayers.includes(id) && !oldInstaBoosters.includes(id));
         }
 
         window.__remainingBoosterPlayers = remainingPlayers;
@@ -428,14 +464,14 @@ async function severalLeagues() {
         if (instaPlayers.length && CONFIG.addInstaBoosterDetection.enabled) {
             console.log(`[Several Leagues] ⚠️ Detected insta reboosters: ${instaPlayers.join(', ')}`);
             doWhenSelectorAvailable('.data-row.body-row', () => {
-                applyCautionIcons(historyData.history, instaPlayers, remainingPlayers);
+                applyCautionIcons(historyData.history, instaPlayers, remainingPlayers, oldInstaBoosters);
             });
         }
     }
 
-    function applyCautionIcons(historyData, instaPlayers, remainingPlayers) {
+    function applyCautionIcons(historyData, instaPlayers, remainingPlayers, oldInstaBoosters) {
 
-        function addCautionIcon(row, playerId, historyData, maxBatches = 8, insta = true) {
+        function addCautionIcon(row, playerId, historyData, maxBatches = 8, insta = true, oldInsta = false) {
             const playerHistory = historyData[playerId];
             if (!playerHistory || !playerHistory.length) return;
 
@@ -444,7 +480,7 @@ async function severalLeagues() {
 
             const icon = document.createElement('span');
             icon.className = 'hh-caution';
-            icon.textContent = insta ? '⚠️' : 'ℹ️';
+            icon.textContent = insta || oldInsta ? '⚠️' : 'ℹ️';
             icon.style.marginLeft = '4px';
             icon.style.cursor = 'pointer';
 
@@ -472,6 +508,8 @@ async function severalLeagues() {
             tooltip.className = 'hh-caution-tooltip';
             if (insta) {
                 tooltip.innerHTML = `<div style="margin-bottom:6px; color:#ff3300ff; font-size: 1rem;">INSTABOOSTER Detected</div>${batchTexts.join('')}`;
+            } else if (oldInsta) {
+                tooltip.innerHTML = `<div style="margin-bottom:6px; color:#ff3300ff; font-size: 1rem;">Former INSTABOOSTER</div>${batchTexts.join('')}`;
             } else {
                 tooltip.innerHTML = `<div style="margin-bottom:6px; color:#185affff; font-size: 1rem;">Booster History</div>${batchTexts.join('')}`;
             }
@@ -539,10 +577,13 @@ async function severalLeagues() {
             if (!id) return;
 
             if (instaPlayers.includes(id)) {
-                addCautionIcon(row, id, historyData);
+                addCautionIcon(row, id, historyData, 8, true, false);
+            }
+            else if (oldInstaBoosters.includes(id)) {
+                addCautionIcon(row, id, historyData, 8, false, true);
             }
             else if (remainingPlayers.includes(id)) {
-                addCautionIcon(row, id, historyData, 4, false);
+                addCautionIcon(row, id, historyData, 8, false, false);
             }
         });
     }
@@ -941,6 +982,7 @@ async function severalLeagues() {
                         <div style="margin-top:10px; display:flex;flex-direction:column;gap:4px;color:#999DA0;">
                             <div>- ⚠️ icon beside player names.</div>
                             <div>- Hover over icon to see recent booster history.</div>
+                            <div>- Stays flagged even if they stop insta boosting (Slightly Transparent).</div>
                         </div>`,
                 default: true,
                 subSettings: [
@@ -1116,7 +1158,7 @@ async function severalLeagues() {
         if (!window.__instaBoosterCache) return;
         const { historyData, instaPlayers } = window.__instaBoosterCache;
         if (config.addInstaBoosterDetection.addBoosterInfoForAll) {
-            applyCautionIcons(historyData, instaPlayers, window.__remainingBoosterPlayers);
+            applyCautionIcons(historyData, instaPlayers, window.__remainingBoosterPlayers, window.__oldInstaBoosters);
         }
     });
 
