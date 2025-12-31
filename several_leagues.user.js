@@ -1162,9 +1162,7 @@ async function severalLeagues() {
     const cautionObserver = new MutationObserver(() => {
         if (!window.__instaBoosterCache) return;
         const { historyData, instaPlayers } = window.__instaBoosterCache;
-        if (config.addInstaBoosterDetection.addBoosterInfoForAll) {
-            applyCautionIcons(historyData, instaPlayers, window.__remainingBoosterPlayers, window.__oldInstaBoosters);
-        }
+        applyCautionIcons(historyData, instaPlayers, window.__remainingBoosterPlayers, window.__oldInstaBoosters);
     });
 
     doWhenSelectorAvailable('.data-list', () => {
