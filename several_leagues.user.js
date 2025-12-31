@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.1.1
+// @version      4.1.2
 // @author       arush
 // @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
@@ -573,7 +573,7 @@ async function severalLeagues() {
             priceEl.innerHTML = '';
             priceEl.style.textAlign = 'center';
             priceEl.style.fontSize = '12px';
-            priceEl.style.color = '#ffdd55';
+            priceEl.style.color = '#ffbf00ff';
             priceEl.style.textShadow = '1px 1px 2px #000';
             priceEl.textContent = `Ends at ${timeText}`;
             return true;
