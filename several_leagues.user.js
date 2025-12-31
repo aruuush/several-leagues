@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.2.2
+// @version      4.2.3
 // @author       arush
 // @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
@@ -987,6 +987,7 @@ async function severalLeagues() {
                             <div>- ⚠️ icon beside player names.</div>
                             <div>- Hover over icon to see recent booster history.</div>
                             <div>- Stays flagged even if they stop insta boosting (Slightly Transparent).</div>
+                            <div>- Resets everything on League reset.</div>
                         </div>`,
                 default: true,
                 subSettings: [
