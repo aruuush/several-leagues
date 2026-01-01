@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.2.4
+// @version      4.2.5
 // @author       arush
 // @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
