@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.2.5
+// @version      4.2.6
 // @author       arush
 // @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
@@ -571,6 +571,12 @@ async function severalLeagues() {
                 tooltip.style.display = 'none';
             });
 
+            // Hide icon on right click
+            icon.addEventListener('contextmenu', (e) => {
+                icon.style.display = 'none';
+                e.preventDefault();
+            });
+
             nickCell.appendChild(icon);
         }
 
@@ -988,6 +994,7 @@ async function severalLeagues() {
                             <div>- Hover over icon to see recent booster history.</div>
                             <div>- Stays flagged even if they stop insta boosting (Slightly Transparent).</div>
                             <div>- Resets everything on League reset.</div>
+                            <div>- Right click icon to hide it for that player.</div>
                         </div>`,
                 default: true,
                 subSettings: [
