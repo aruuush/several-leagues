@@ -1161,6 +1161,7 @@ async function severalLeagues() {
 
     const cautionObserver = new MutationObserver(() => {
         if (!window.__instaBoosterCache) return;
+        if (!config.addInstaBoosterDetection.enabled) return;
         const { historyData, instaPlayers } = window.__instaBoosterCache;
         applyCautionIcons(historyData, instaPlayers, window.__remainingBoosterPlayers, window.__oldInstaBoosters);
     });
