@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.2.7
+// @version      4.2.8
 // @author       arush
 // @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
@@ -744,18 +744,19 @@ async function severalLeagues() {
             }
 
             let desc;
-            if (restore_state) {
-                const saved = GM_getValue(SORT_KEY, {});
-                desc = saved["column"] === 'boosters'
-                    ? saved["direction"] === 'DESC'
-                    : true;
-            } else {
-                desc = true;
-            }
             header.addEventListener('click', (e) => {
                 e.stopPropagation();
                 // Refresh cached expirations once per click (in case boosters updated)
                 document.querySelectorAll('.data-list .data-row.body-row').forEach(r => delete r.dataset.expTs);
+
+                if (restore_state) {
+                    const saved = GM_getValue(SORT_KEY, {});
+                    desc = saved["column"] === 'boosters'
+                        ? saved["direction"] === 'DESC'
+                        : true;
+                } else {
+                    desc = true;
+                }
 
                 desc = !desc;
                 applyVisualOrder(desc);
@@ -881,7 +882,6 @@ async function severalLeagues() {
             const column = header.getAttribute('column');
             if (!column) return;
 
-            // Native columns
             const direction = header.getAttribute('sorting');
             if (!direction) return;
 
