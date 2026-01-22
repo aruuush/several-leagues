@@ -337,6 +337,49 @@ async function severalLeagues() {
 
     // ------------ Build Booster Map and InstaBooster Detection ------------
     function buildBoosterExpiryMap(CONFIG) {
+
+        function normalizeHistory(history) {
+            /* For backwords compatibility, we support two formats in the history:
+        
+            OLD FORMAT: {
+                playerId: [
+                    [lifetime1, lifetime2, ...],  // batch 1
+                    [lifetime1, lifetime2, ...],  // batch 2
+                    ...
+                ]
+            }
+            NEW FORMAT: {
+                playerId: [
+                    [ { id: boosterId, lifetime: number }, ... ],  // batch 1
+                    [ { id: boosterId, lifetime: number }, ... ],  // batch 2
+                    ...
+                ]
+            }
+            */
+            const normalized = {};
+
+            for (const playerId in history) {
+                normalized[playerId] = history[playerId].map(batch => {
+
+                    // OLD FORMAT
+                    if (typeof batch[0] === 'number') {
+                        return batch.map(lifetime => ({
+                            id: null,          // unknown for old data
+                            lifetime
+                        }));
+                    }
+
+                    // NEW FORMAT already
+                    return batch.map(b => ({
+                        id: b.id ?? null,
+                        lifetime: Number(b.lifetime)
+                    }));
+                });
+            }
+
+            return normalized;
+        }
+
         function loadHistory() {
             const data = GM_getValue(HISTORY_KEY, {});
             const currentLeagueKey = server_now_ts + season_end_at;
@@ -357,10 +400,34 @@ async function severalLeagues() {
             GM_setValue(HISTORY_KEY, data);
         }
 
+        function boosterKey(b) {
+            // Prefer ID when available, fallback to lifetime for old data
+            return b.id != null ? `id:${b.id}` : `t:${b.lifetime}`;
+        }
+
+        function makeBatchSet(batch) {
+            const set = new Set();
+            for (const b of batch) {
+                set.add(boosterKey(b));
+            }
+            return set;
+        }
+
+        function isSubsetSet(a, b) {
+            // is set A ⊆ set B
+            for (const v of a) {
+                if (!b.has(v)) return false;
+            }
+            return true;
+        }
+
         const l = opponents_list;
         if (!Array.isArray(l)) return;
 
+        // Load and normalize history in case data is in old format
         const historyData = loadHistory();
+        historyData.history = normalizeHistory(historyData.history || {});
+
         window.boosterExpiries = new Map();
         const instaPlayers = [];
         const instaBoostedHistory = GM_getValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []);
@@ -425,14 +492,40 @@ async function severalLeagues() {
             window.boosterExpiries.set(id, { boosters: boosterObjs, insta: instaFlag });
             if (instaFlag) instaPlayers.push(id);
 
-            // Update history with current batches
+            // Update history with current batches (partial-batch safe)
             if (!historyData.history[id]) historyData.history[id] = [];
+
+            const storedBatches = historyData.history[id];
+
             batches.forEach(batch => {
-                const lifetimes = batch.map(b => b.lifetime);
-                // check if batch already exists in history
-                const exists = historyData.history[id].some(h => JSON.stringify(h) === JSON.stringify(lifetimes));
+
+                const newBatch = batch.map(b => ({
+                    id: b.id_member_booster_equipped,
+                    lifetime: b.lifetime
+                }));
+
+                const newSet = makeBatchSet(newBatch);
+
+                let exists = false;
+
+                for (let i = storedBatches.length - 1; i >= 0; i--) {
+                    const oldBatch = storedBatches[i];
+                    const oldSet = makeBatchSet(oldBatch);
+
+                    // Exact match → skip insert
+                    if (oldSet.size === newSet.size && isSubsetSet(oldSet, newSet)) {
+                        exists = true;
+                        break;
+                    }
+
+                    // Old batch is partial snapshot → delete it
+                    if (oldSet.size < newSet.size && isSubsetSet(oldSet, newSet)) {
+                        storedBatches.splice(i, 1);
+                    }
+                }
+
                 if (!exists) {
-                    historyData.history[id].push(lifetimes);
+                    storedBatches.push(newBatch);
                 }
             });
         }
@@ -450,7 +543,7 @@ async function severalLeagues() {
         // Remove players from current insta boosted list if they no longer insta boost
         const oldInstaBoosters = instaBoostedHistory.filter(id => !instaPlayers.includes(id));
         window.__oldInstaBoosters = oldInstaBoosters;
-        
+
         // Add new insta boosters to history
         const combinedInstaBoosters = [...new Set(oldInstaBoosters.concat(instaPlayers))];
         GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, combinedInstaBoosters);
@@ -998,7 +1091,8 @@ async function severalLeagues() {
                         </div>`,
                 default: true,
                 subSettings: [
-                    { key: 'addBoosterInfoForAll', default: false,
+                    {
+                        key: 'addBoosterInfoForAll', default: false,
                         label: 'Add ℹ️ icon for others',
                     },
                 ],
