@@ -756,7 +756,7 @@ async function severalLeagues() {
     }
 
     // ------------ Sort By Booster Expiration ------------
-    function sortByBoosterExpirationInit(restore_state = false) {
+    function sortByBoosterExpirationInit() {
         // 1) Perf CSS: make long lists scroll smoothly even with flex
         const style = document.createElement('style');
         style.textContent = `
@@ -842,28 +842,20 @@ async function severalLeagues() {
                 // Refresh cached expirations once per click (in case boosters updated)
                 document.querySelectorAll('.data-list .data-row.body-row').forEach(r => delete r.dataset.expTs);
 
-                if (restore_state) {
-                    const saved = GM_getValue(SORT_KEY, {});
-                    desc = saved["column"] === 'boosters'
-                        ? saved["direction"] === 'DESC'
-                        : true;
-                } else {
-                    desc = true;
-                }
+                const saved = GM_getValue(SORT_KEY, {});
+                desc = saved["column"] === 'boosters'
+                    ? saved["direction"] === 'DESC'
+                    : true;
 
                 desc = !desc;
                 applyVisualOrder(desc);
                 icon.className = desc ? 'downArrow_mix_icn' : 'upArrow_mix_icn';
 
                 // SAVE STATE
-                if (restore_state) {
-                    GM_setValue(SORT_KEY, {
-                        column: 'boosters',
-                        direction: desc ? 'DESC' : 'ASC'
-                    });
-                } else {
-                    GM_deleteValue(SORT_KEY);
-                }
+                GM_setValue(SORT_KEY, {
+                    column: 'boosters',
+                    direction: desc ? 'DESC' : 'ASC'
+                });
             });
         };
 
@@ -876,17 +868,41 @@ async function severalLeagues() {
         });
 
         // Restore boosters sorting on load
-        if (restore_state) {
-            const saved = GM_getValue(SORT_KEY, {});
-            if (saved["column"] === 'boosters') {
-                requestAnimationFrame(() => {
-                    applyVisualOrder(saved["direction"] === 'DESC');
-                    icon.className = saved["direction"] === 'DESC'
-                        ? 'downArrow_mix_icn'
-                        : 'upArrow_mix_icn';
+        const saved = GM_getValue(SORT_KEY, {});
+        if (saved["column"] === 'boosters') {
+            requestAnimationFrame(() => {
+                applyVisualOrder(saved["direction"] === 'DESC');
+                icon.className = saved["direction"] === 'DESC'
+                    ? 'downArrow_mix_icn'
+                    : 'upArrow_mix_icn';
+            });
+        }
+    }
+    
+    function SortPersistenceInit() {
+        const headerRow = document.querySelector('.data-row.head-row');
+        if (!headerRow) return;
+
+        headerRow.addEventListener('click', (e) => {
+            const header = e.target.closest('.head-column');
+            if (!header) return;
+
+            const column = header.getAttribute('column');
+            if (!column) return;
+
+            const direction = header.getAttribute('sorting');
+            if (!direction) return;
+
+            if (column !== 'boosters') {
+                // SAVE STATE
+                GM_setValue(SORT_KEY, {
+                    column: column,
+                    direction: direction === 'DESC' ? 'DESC' : 'ASC'
                 });
             }
-        }
+
+            console.log(`[Several Leagues] ✅ Sorted by ${column} (${direction})`);
+        });
     }
 
     // ------------ Disable 3x button ------------
@@ -964,31 +980,6 @@ async function severalLeagues() {
     }
 
     // ------------ Sort Persistence ------------
-    function SortPersistenceInit() {
-        const headerRow = document.querySelector('.data-row.head-row');
-        if (!headerRow) return;
-
-        headerRow.addEventListener('click', (e) => {
-            const header = e.target.closest('.head-column');
-            if (!header) return;
-
-            const column = header.getAttribute('column');
-            if (!column) return;
-
-            const direction = header.getAttribute('sorting');
-            if (!direction) return;
-
-            if (column !== 'boosters') {
-                // SAVE STATE
-                GM_setValue(SORT_KEY, {
-                    column: column,
-                    direction: direction === 'DESC' ? 'DESC' : 'ASC'
-                });
-            }
-
-            console.log(`[Several Leagues] ✅ Sorted by ${column} (${direction})`);
-        });
-    }
 
     // ------------ Main Execution ------------
     async function loadConfig() {
@@ -1003,8 +994,6 @@ async function severalLeagues() {
             addInstaBoosterDetection:
                 { enabled: true, addBoosterInfoForAll: true },
             disableMultiBattleButton:
-                { enabled: true },
-            restoreSortState:
                 { enabled: true },
         };
 
@@ -1157,21 +1146,6 @@ async function severalLeagues() {
         });
         config.disableMultiBattleButton.enabled = false;
 
-        registerModule({
-            group: 'SeveralLeagues',
-            configSchema: {
-                baseKey: 'restoreSortState',
-                label: `Persistent booster expiration sorting across page reloads`,
-                default: true,
-            },
-            run() {
-                config.restoreSortState = {
-                    enabled: true,
-                };
-            }
-        });
-        config.restoreSortState.enabled = false;
-
         hhLoadConfig();
         runModules();
 
@@ -1224,10 +1198,6 @@ async function severalLeagues() {
         return;
     }
 
-    if (config.restoreSortState.enabled) {
-        doWhenSelectorAvailable('.data-row.head-row', SortPersistenceInit);
-    }
-
     if (config.starLeague.enabled) {
         doWhenSelectorAvailable('.data-column.head-column[column="level"]', starInit);
     }
@@ -1241,7 +1211,8 @@ async function severalLeagues() {
     }
 
     if (config.sortByBoosterExpiration.enabled) {
-        doWhenSelectorAvailable('.head-column[column="boosters"]', () => sortByBoosterExpirationInit(config.restoreSortState.enabled));
+        doWhenSelectorAvailable('.data-row.head-row', SortPersistenceInit);
+        doWhenSelectorAvailable('.head-column[column="boosters"]', () => sortByBoosterExpirationInit());
     }
 
     // Global variable for armed state
