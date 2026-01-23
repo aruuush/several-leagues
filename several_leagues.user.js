@@ -338,6 +338,57 @@ async function severalLeagues() {
     // ------------ Build Booster Map and InstaBooster Detection ------------
     function buildBoosterExpiryMap(CONFIG) {
 
+        function dedupeHistory(history) {
+            /* Deduplicate booster history data to save space */
+
+            const cleaned = {};
+
+            for (const playerId in history) {
+
+                const batches = history[playerId];
+                const uniqueBatches = [];
+
+                for (const batch of batches) {
+
+                    // ---- Remove empty batches ----
+                    if (!batch.length) continue;
+
+                    // ---- Deduplicate entire batches ----
+                    let inserted = false;
+
+                    for (let i = 0; i < uniqueBatches.length; i++) {
+
+                        const existing = uniqueBatches[i];
+
+                        const same =
+                            existing.length === batch.length &&
+                            isBatchSubset(existing, batch);
+
+                        if (!same) continue;
+
+                        // Upgrade null-id batch
+                        if (batchHasNullIds(existing) && batchHasRealIds(batch)) {
+                            uniqueBatches[i] = batch;
+                        }
+
+                        inserted = true;
+                        break;
+                    }
+
+                    if (!inserted) {
+                        uniqueBatches.push(batch);
+                    }
+
+                }
+
+                if (uniqueBatches.length) {
+                    cleaned[playerId] = uniqueBatches;
+                }
+            }
+
+            return cleaned;
+        }
+
         function normalizeHistory(history) {
             /* For backwords compatibility, we support two formats in the history:
         
@@ -400,25 +451,52 @@ async function severalLeagues() {
             GM_setValue(HISTORY_KEY, data);
         }
 
-        function boosterKey(b) {
-            // Prefer ID when available, fallback to lifetime for old data
-            return b.id != null ? `id:${b.id}` : `t:${b.lifetime}`;
-        }
+        function makeBatchIndex(batch) {
+            const byId = new Map();
+            const byTime = new Map();
 
-        function makeBatchSet(batch) {
-            const set = new Set();
             for (const b of batch) {
-                set.add(boosterKey(b));
+                if (b.id != null) byId.set(b.id, b);
+                byTime.set(b.lifetime, b);
             }
-            return set;
+
+            return { byId, byTime };
         }
 
-        function isSubsetSet(a, b) {
-            // is set A ⊆ set B
-            for (const v of a) {
-                if (!b.has(v)) return false;
+        function boosterExistsInBatch(booster, batchIndex) {
+
+            // Prefer ID match
+            if (booster.id != null && batchIndex.byId.has(booster.id)) {
+                return true;
             }
+
+            // Fallback to lifetime match (old data compatibility)
+            if (batchIndex.byTime.has(booster.lifetime)) {
+                return true;
+            }
+
+            return false;
+        }
+
+        function isBatchSubset(oldBatch, newBatch) {
+
+            const newIndex = makeBatchIndex(newBatch);
+
+            for (const oldBooster of oldBatch) {
+                if (!boosterExistsInBatch(oldBooster, newIndex)) {
+                    return false;
+                }
+            }
+
             return true;
+        }
+
+        function batchHasNullIds(batch) {
+            return batch.some(b => b.id == null);
+        }
+
+        function batchHasRealIds(batch) {
+            return batch.some(b => b.id != null);
         }
 
         const l = opponents_list;
@@ -426,7 +504,9 @@ async function severalLeagues() {
 
         // Load and normalize history in case data is in old format
         const historyData = loadHistory();
-        historyData.history = normalizeHistory(historyData.history || {});
+        historyData.history = dedupeHistory(
+            normalizeHistory(historyData.history || {})
+        );
 
         window.boosterExpiries = new Map();
         const instaPlayers = [];
@@ -470,13 +550,17 @@ async function severalLeagues() {
             // Take last 4 expired batches from history
             const now = server_now_ts;
             const expiredBatches = playerHistory
-                .filter(batch => batch[batch.length - 1] <= now)
+                .filter(batch =>
+                    batch.length &&
+                    Number.isFinite(batch[batch.length - 1].lifetime) &&
+                    batch[batch.length - 1].lifetime <= now
+                )
                 .slice(-4);
 
             let instaFlag = false;
             if (expiredBatches.length) {
                 for (const expiredBatch of expiredBatches) {
-                    const lastExpiredBatchEnd = expiredBatch[0]; // earliest in the expired batch
+                    const lastExpiredBatchEnd = expiredBatch[0].lifetime; // earliest in the expired batch
                     for (const batch of batches) {
                         const batchStart = batch[0].lifetime;
                         if (batchStart - lastExpiredBatchEnd <= 86400 + instaBoosterThreshold && batchStart - lastExpiredBatchEnd >= 86400) {
@@ -504,22 +588,34 @@ async function severalLeagues() {
                     lifetime: b.lifetime
                 }));
 
-                const newSet = makeBatchSet(newBatch);
-
                 let exists = false;
 
                 for (let i = storedBatches.length - 1; i >= 0; i--) {
-                    const oldBatch = storedBatches[i];
-                    const oldSet = makeBatchSet(oldBatch);
 
-                    // Exact match → skip insert
-                    if (oldSet.size === newSet.size && isSubsetSet(oldSet, newSet)) {
+                    const oldBatch = storedBatches[i];
+
+                    const sameContent =
+                        oldBatch.length === newBatch.length &&
+                        isBatchSubset(oldBatch, newBatch);
+
+                    const partialContent =
+                        oldBatch.length < newBatch.length &&
+                        isBatchSubset(oldBatch, newBatch);
+
+                    // ---- 1) Upgrade null-id batch ----
+                    if (sameContent && batchHasNullIds(oldBatch) && batchHasRealIds(newBatch)) {
+                        storedBatches.splice(i, 1);
+                        continue;
+                    }
+
+                    // ---- 2) True duplicate ----
+                    if (sameContent) {
                         exists = true;
                         break;
                     }
 
-                    // Old batch is partial snapshot → delete it
-                    if (oldSet.size < newSet.size && isSubsetSet(oldSet, newSet)) {
+                    // ---- 3) Remove partial snapshot ----
+                    if (partialContent) {
                         storedBatches.splice(i, 1);
                     }
                 }
@@ -527,6 +623,7 @@ async function severalLeagues() {
                 if (!exists) {
                     storedBatches.push(newBatch);
                 }
+
             });
         }
 
@@ -594,7 +691,7 @@ async function severalLeagues() {
 
             const lastBatches = playerHistory.slice(-maxBatches);
             const batchTexts = lastBatches.map((batch, index) => {
-                const times = batch.map(ts => fmt(ts)).join(', ');
+                const times = batch.map(b => fmt(b.lifetime)).join(', ');
                 return `<div style="color:${colors[index % colors.length]}; margin-bottom:4px;">
                     <strong>Batch ${index + 1}:</strong>
                     <span style="color:${colors[index % colors.length]}; padding-left:10px;">${times}</span>
@@ -878,7 +975,7 @@ async function severalLeagues() {
             });
         }
     }
-    
+
     function SortPersistenceInit() {
         const headerRow = document.querySelector('.data-row.head-row');
         if (!headerRow) return;
