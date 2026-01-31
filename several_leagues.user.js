@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.2.9
+// @version      4.2.10
 // @author       arush
 // @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
@@ -34,26 +34,21 @@
 // ==/UserScript==
 
 if (unsafeWindow.__severalLeaguesInitialized) {
-    console.log('[Several Leagues] already initialized, skipping');
     return;
 }
 unsafeWindow.__severalLeaguesInitialized = true;
 
 function waitForHHPlusPlus(cb) {
     if (unsafeWindow.hhPlusPlusConfig) {
-        console.log('[Several Leagues] HH++ already loaded');
         cb();
         return;
     }
-
-    console.log('[Several Leagues] waiting for HHPlusPlus');
 
     let done = false;
 
     const finish = () => {
         if (done) return;
         done = true;
-        console.log('[Several Leagues] HH++ detected');
         cb();
     };
 
@@ -118,7 +113,7 @@ async function severalLeagues() {
                 const raw = GM_getValue(STARRED_KEY, []);
                 return new Set(raw);
             } catch (e) {
-                console.error('Failed to load starred players', e);
+                console.error('Several Leagues: Failed to load starred players', e);
                 return new Set();
             }
         }
@@ -127,7 +122,7 @@ async function severalLeagues() {
             try {
                 GM_setValue(STARRED_KEY, [...set]);
             } catch (e) {
-                console.error('Failed to save starred players', e);
+                console.error('Several Leagues: Failed to save starred players', e);
             }
         }
 
@@ -656,7 +651,6 @@ async function severalLeagues() {
 
         // Place ⚠️ icon beside player names
         if (instaPlayers.length && CONFIG.addInstaBoosterDetection.enabled) {
-            console.log(`[Several Leagues] ⚠️ Detected insta reboosters: ${instaPlayers.join(', ')}`);
             doWhenSelectorAvailable('.data-row.body-row', () => {
                 applyCautionIcons(historyData.history, instaPlayers, remainingPlayers, oldInstaBoosters);
             });
@@ -913,8 +907,6 @@ async function severalLeagues() {
                     r.style.order = idx;
                 });
             });
-
-            console.log(`[Several Leagues] ✅ Sorted by booster expiration (${desc ? 'latest → earliest' : 'earliest → latest'})`);
         };
 
         // Hook up the header click (two-state toggle)
@@ -997,8 +989,6 @@ async function severalLeagues() {
                     direction: direction === 'DESC' ? 'DESC' : 'ASC'
                 });
             }
-
-            console.log(`[Several Leagues] ✅ Sorted by ${column} (${direction})`);
         });
     }
 
@@ -1039,11 +1029,9 @@ async function severalLeagues() {
                                 updateBtnStyle(btn);
                             }, 3000);
 
-                            console.log('[Several Leagues] ⚡ MultiBattle button armed. Click again to start!');
                         } else {
                             // Second click → let the game handle normally
                             multiBattleArmed = false;
-                            console.log('[Several Leagues] 🚀 MultiBattle button clicked!');
                         }
                     }, true);
                 }
@@ -1255,28 +1243,24 @@ async function severalLeagues() {
         if (STARRED_VALS !== null && STARRED_VALS !== undefined) {
             GM_setValue(STARRED_KEY, JSON.parse(STARRED_VALS));
             localStorage.removeItem(STARRED_KEY);
-            console.log('[Several Leagues] Transferred starred players from localStorage to GM storage');
         }
         const FILTER_MODE_VAL = localStorage.getItem(FILTER_MODE_KEY);
         if (FILTER_MODE_VAL !== null && FILTER_MODE_VAL !== undefined) {
             GM_setValue(FILTER_MODE_KEY, FILTER_MODE_VAL);
             localStorage.removeItem(FILTER_MODE_KEY);
-            console.log('[Several Leagues] Transferred filter mode from localStorage to GM storage');
         }
         const SORT_STATE_VAL = localStorage.getItem(SORT_KEY);
         if (SORT_STATE_VAL !== null && SORT_STATE_VAL !== undefined) {
             GM_setValue(SORT_KEY, JSON.parse(SORT_STATE_VAL));
             localStorage.removeItem(SORT_KEY);
-            console.log('[Several Leagues] Transferred sort state from localStorage to GM storage');
         }
         const BOOSTER_HISTORY_VAL = localStorage.getItem('boosterHistory');
         if (BOOSTER_HISTORY_VAL !== null && BOOSTER_HISTORY_VAL !== undefined) {
             GM_setValue('boosterHistory', BOOSTER_HISTORY_VAL);
             localStorage.removeItem('boosterHistory');
-            console.log('[Several Leagues] Transferred booster history from localStorage to GM storage');
         }
     } catch (e) {
-        console.error('[Several Leagues] Failed to transfer data from localStorage to GM storage', e);
+        console.error('Several Leagues: Failed to transfer data from localStorage to GM storage', e);
     }
 
 
