@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.2.10
+// @version      4.2.11
 // @author       arush
 // @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
@@ -333,113 +333,6 @@ async function severalLeagues() {
     // ------------ Build Booster Map and InstaBooster Detection ------------
     function buildBoosterExpiryMap(CONFIG) {
 
-        function dedupeHistory(history) {
-            /* Deduplicate booster history data to save space */
-
-            const cleaned = {};
-
-            for (const playerId in history) {
-
-                const batches = history[playerId];
-                const uniqueBatches = [];
-
-                for (const batch of batches) {
-
-                    // ---- Remove empty batches ----
-                    if (!batch.length) continue;
-
-                    // ---- Deduplicate entire batches ----
-                    let inserted = false;
-                    const idx = makeBatchIndex(batch);
-
-                    for (let i = 0; i < uniqueBatches.length; i++) {
-
-                        const existing = uniqueBatches[i];
-
-                        const same =
-                            existing.length === batch.length &&
-                            isBatchSubset(existing, idx);
-
-                        if (!same) continue;
-
-                        // Upgrade null-id batch
-                        const { hasNull } = batchIdState(existing);
-                        const { hasReal } = batchIdState(batch);
-                        if (hasNull && hasReal) {
-                            uniqueBatches[i] = batch;
-                        }
-
-                        inserted = true;
-                        break;
-                    }
-
-                    if (!inserted) {
-                        uniqueBatches.push(batch);
-                    }
-
-                }
-
-                if (uniqueBatches.length) {
-                    cleaned[playerId] = uniqueBatches;
-                }
-            }
-
-            return cleaned;
-        }
-
-        function normalizeHistory(history) {
-            /* For backwords compatibility, we support two formats in the history:
-        
-            OLD FORMAT: {
-                playerId: [
-                    [lifetime1, lifetime2, ...],  // batch 1
-                    [lifetime1, lifetime2, ...],  // batch 2
-                    ...
-                ]
-            }
-            NEW FORMAT: {
-                playerId: [
-                    [ { id: boosterId, lifetime: number }, ... ],  // batch 1
-                    [ { id: boosterId, lifetime: number }, ... ],  // batch 2
-                    ...
-                ]
-            }
-            */
-            const normalized = {};
-
-            for (const playerId in history) {
-                normalized[playerId] = history[playerId].map(batch =>
-                    batch.map(b =>
-                        typeof b === "number"
-                            ? { id: null, lifetime: b }
-                            : { id: b.id ?? null, lifetime: Number(b.lifetime) }
-                    )
-                );
-            }
-
-            return normalized;
-        }
-
-        function loadHistory() {
-            const data = GM_getValue(HISTORY_KEY, {});
-            const currentLeagueKey = server_now_ts + season_end_at;
-            if (!data) return { leagueKey: currentLeagueKey, history: {} };
-            try {
-                if (data.leagueKey !== currentLeagueKey) {
-                    GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []);
-                    return { leagueKey: currentLeagueKey, history: {} };
-                }
-                return data;
-            } catch {
-                GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []);
-                return { leagueKey: currentLeagueKey, history: {} };
-            }
-        }
-
-        function saveHistory(data) {
-            GM_setValue(HISTORY_KEY, data);
-        }
-
         function makeBatchIndex(batch) {
             const byId = new Map();
             const byTime = new Map();
@@ -482,27 +375,107 @@ async function severalLeagues() {
             return { hasNull, hasReal };
         }
 
-        const opponents = opponents_list;
-        if (!Array.isArray(opponents)) return;
+        function loadHistory() {
+            const data = GM_getValue(HISTORY_KEY, {});
+            const currentLeagueKey = server_now_ts + season_end_at;
 
-        // Load and normalize history in case data is in old format
-        const historyData = loadHistory();
-        historyData.history = dedupeHistory(
-            normalizeHistory(historyData.history || {})
-        );
+            if (!data) return { leagueKey: currentLeagueKey, history: {} };
 
-        window.boosterExpiries = new Map();
-        const instaPlayers = [];
-        const instaBoostedHistory = GM_getValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []);
+            try {
+                if (data.leagueKey !== currentLeagueKey) {
+                    GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []);
+                    return { leagueKey: currentLeagueKey, history: {} };
+                }
+                return data;
+            } catch {
+                GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []);
+                return { leagueKey: currentLeagueKey, history: {} };
+            }
+        }
 
-        for (let i = 0; i < opponents.length; i++) {
-            const opp = opponents[i];
-            const id = opp.player.id_fighter;
-            const boosters = opp.boosters || [];
-            if (!boosters.length) continue;
+        function saveHistory(data) {
+            GM_setValue(HISTORY_KEY, data);
+        }
 
-            // Prepare current boosters
-            const boosterObjs = boosters
+        function normalizeHistory(history) {
+            const normalized = {};
+
+            for (const playerId in history) {
+                normalized[playerId] = (history[playerId] || []).map(batch =>
+                    batch.map(b =>
+                        typeof b === "number"
+                            ? { id: null, lifetime: b }
+                            : { id: b.id ?? null, lifetime: Number(b.lifetime) }
+                    )
+                );
+            }
+
+            return normalized;
+        }
+
+        function dedupeHistory(history) {
+            const cleaned = {};
+
+            for (const playerId in history) {
+
+                const batches = history[playerId];
+                const uniqueBatches = [];
+
+                for (const batch of batches) {
+
+                    if (!batch.length) continue;
+
+                    let inserted = false;
+                    const idx = makeBatchIndex(batch);
+
+                    for (let i = 0; i < uniqueBatches.length; i++) {
+
+                        const existing = uniqueBatches[i];
+
+                        const same =
+                            existing.length === batch.length &&
+                            isBatchSubset(existing, idx);
+
+                        if (!same) continue;
+
+                        const { hasNull } = batchIdState(existing);
+                        const { hasReal } = batchIdState(batch);
+
+                        if (hasNull && hasReal) {
+                            uniqueBatches[i] = batch;
+                        }
+
+                        inserted = true;
+                        break;
+                    }
+
+                    if (!inserted) {
+                        uniqueBatches.push(batch);
+                    }
+                }
+
+                if (uniqueBatches.length) {
+                    cleaned[playerId] = uniqueBatches;
+                }
+            }
+
+            return cleaned;
+        }
+
+        function loadAndNormalizeHistory() {
+            const historyData = loadHistory();
+
+            historyData.history = dedupeHistory(
+                normalizeHistory(historyData.history || {})
+            );
+
+            return historyData;
+        }
+
+        function extractBoosters(boosters) {
+            if (!Array.isArray(boosters)) return [];
+
+            return boosters
                 .filter(b => b && b.lifetime && b.id_member_booster_equipped)
                 .map(b => ({
                     id_member_booster_equipped: b.id_member_booster_equipped,
@@ -510,15 +483,14 @@ async function severalLeagues() {
                 }))
                 .filter(b => Number.isFinite(b.lifetime))
                 .sort((a, b) => a.lifetime - b.lifetime);
+        }
 
-            if (!boosterObjs.length) continue;
-
-            // Group current boosters into batches (<=10s difference)
+        function buildBoosterBatches(boosterObjs) {
             const batches = [];
             let batch = [boosterObjs[0]];
 
-            for (let j = 1; j < boosterObjs.length; j++) {
-                const b = boosterObjs[j];
+            for (let i = 1; i < boosterObjs.length; i++) {
+                const b = boosterObjs[i];
 
                 if (b.lifetime - batch[batch.length - 1].lifetime <= BATCH_GAP_THRESHOLD) {
                     batch.push(b);
@@ -527,13 +499,14 @@ async function severalLeagues() {
                     batch = [b];
                 }
             }
-
             batches.push(batch);
 
-            // Get last 4 historical batches (expired only)
-            const playerHistory = historyData.history[id] || [];
+            return batches;
+        }
 
-            // Take last 4 expired batches from history
+        function detectInstaBoost(batches, playerHistory) {
+            if (!playerHistory || !playerHistory.length) return false;
+
             const now = server_now_ts;
             const expiredBatches = playerHistory
                 .filter(batch =>
@@ -543,32 +516,26 @@ async function severalLeagues() {
                 )
                 .slice(-4);
 
-            let instaFlag = false;
-            if (expiredBatches.length) {
-                for (const expiredBatch of expiredBatches) {
-                    const lastExpiredBatchEnd = expiredBatch[0].lifetime; // earliest in the expired batch
-                    for (const batch of batches) {
-                        const batchStart = batch[0].lifetime;
-                        if (batchStart - lastExpiredBatchEnd <= 86400 + instaBoosterThreshold && batchStart - lastExpiredBatchEnd >= 86400) {
-                            instaFlag = true;
-                            break; // insta detected, no need to check further
-                        }
-                    }
-                    if (instaFlag) break;
+            for (const expiredBatch of expiredBatches) {
+                const lastExpiredBatchEnd = expiredBatch[0].lifetime;
+                for (const batch of batches) {
+
+                    const batchStart = batch[0].lifetime;
+                    if (
+                        batchStart - lastExpiredBatchEnd <= 86400 + instaBoosterThreshold &&
+                        batchStart - lastExpiredBatchEnd >= 86400
+                    ) return true;
                 }
             }
 
-            // Save boosters + insta flag
-            window.boosterExpiries.set(id, { boosters: boosterObjs, insta: instaFlag });
-            if (instaFlag) instaPlayers.push(id);
+            return false;
+        }
 
-            // Update history with current batches (partial-batch safe)
-            if (!historyData.history[id]) historyData.history[id] = [];
+        function updateBoosterHistory(history, playerId, batches) {
+            if (!history[playerId]) history[playerId] = [];
 
-            const storedBatches = historyData.history[id];
-
-            batches.forEach(batch => {
-
+            const storedBatches = history[playerId];
+            for (const batch of batches) {
                 const newBatch = batch.map(b => ({
                     id: b.id_member_booster_equipped,
                     lifetime: b.lifetime
@@ -580,12 +547,9 @@ async function severalLeagues() {
 
                 for (let i = storedBatches.length - 1; i >= 0; i--) {
                     const oldBatch = storedBatches[i];
+                    const subset = isBatchSubset(oldBatch, newIndex);
+                    const sameContent = subset && oldBatch.length === newBatch.length;
 
-                    const oldIsSubsetOfNew = isBatchSubset(oldBatch, newIndex);
-                    const sameContent =
-                        oldBatch.length === newBatch.length && oldIsSubsetOfNew;
-
-                    // ---- 1) Upgrade null-id batch ----
                     const { hasNull } = batchIdState(oldBatch);
 
                     if (sameContent && hasNull && hasReal) {
@@ -593,61 +557,88 @@ async function severalLeagues() {
                         continue;
                     }
 
-                    // ---- 2) True duplicate ----
                     if (sameContent) {
                         exists = true;
                         break;
                     }
 
-                    // ---- 3) Remove subset snapshot ----
-                    if (oldIsSubsetOfNew) {
-                        storedBatches.splice(i, 1);
-                    }
+                    if (subset) storedBatches.splice(i, 1);
                 }
 
-                if (!exists) {
-                    storedBatches.push(newBatch);
-                }
+                if (!exists) storedBatches.push(newBatch);
+            }
+        }
 
+        function finalizeHistory(historyData) {
+            const leagueKey = server_now_ts + season_end_at;
+
+            saveHistory({
+                leagueKey,
+                history: historyData.history
             });
         }
 
-        const leagueKey = server_now_ts + season_end_at;
+        function finalizeInstaPlayers(CONFIG, opponents, instaPlayers, instaBoostedHistory, historyData) {
+            const instaSet = new Set(instaPlayers);
 
-        // Save history back to GM storage
-        saveHistory({ leagueKey: leagueKey, history: historyData.history });
+            const oldInstaBoosters = instaBoostedHistory.filter(id => !instaSet.has(id));
+            window.__oldInstaBoosters = oldInstaBoosters;
 
-        window.__instaBoosterCache = {
-            historyData: historyData.history,
-            instaPlayers
-        };
+            const combined = [...new Set([...oldInstaBoosters, ...instaPlayers])];
+            GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, combined);
 
-        // Remove players from current insta boosted list if they no longer insta boost
-        const instaSet = new Set(instaPlayers);
-        const oldInstaBoosters =
-            instaBoostedHistory.filter(id => !instaSet.has(id));
+            let remainingPlayers = [];
+            if (CONFIG.addInstaBoosterDetection.addBoosterInfoForAll) {
+                remainingPlayers = opponents
+                    .map(o => o.player.id_fighter)
+                    .filter(id =>
+                        !instaSet.has(id) &&
+                        !oldInstaBoosters.includes(id)
+                    );
+            }
+            window.__remainingBoosterPlayers = remainingPlayers;
+            window.__instaBoosterCache = {
+                historyData: historyData.history,
+                instaPlayers
+            };
 
-        window.__oldInstaBoosters = oldInstaBoosters;
-
-        // Add new insta boosters to history
-        const combinedInstaBoosters = [...new Set([...oldInstaBoosters, ...instaPlayers])];
-        GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, combinedInstaBoosters);
-
-        let remainingPlayers = [];
-        if (CONFIG.addInstaBoosterDetection.addBoosterInfoForAll) {
-            remainingPlayers = opponents
-                .map(opp => opp.player.id_fighter)
-                .filter(id => !instaPlayers.includes(id) && !oldInstaBoosters.includes(id));
+            if (instaPlayers.length && CONFIG.addInstaBoosterDetection.enabled) {
+                doWhenSelectorAvailable('.data-row.body-row', () => {
+                    applyCautionIcons(
+                        historyData.history,
+                        instaPlayers,
+                        remainingPlayers,
+                        oldInstaBoosters
+                    );
+                });
+            }
         }
 
-        window.__remainingBoosterPlayers = remainingPlayers;
+        const opponents = Array.isArray(opponents_list) ? opponents_list : [];
 
-        // Place ⚠️ icon beside player names
-        if (instaPlayers.length && CONFIG.addInstaBoosterDetection.enabled) {
-            doWhenSelectorAvailable('.data-row.body-row', () => {
-                applyCautionIcons(historyData.history, instaPlayers, remainingPlayers, oldInstaBoosters);
-            });
+        const historyData = loadAndNormalizeHistory();
+        window.boosterExpiries = new Map();
+
+        const instaPlayers = [];
+        const instaBoostedHistory = GM_getValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []);
+
+        for (const opp of opponents) {
+            const id = opp.player.id_fighter;
+            const boosterObjs = extractBoosters(opp.boosters);
+            
+            if (!boosterObjs.length) continue;
+
+            const batches = buildBoosterBatches(boosterObjs);
+            const playerHistory = historyData.history[id] ?? [];
+            const instaFlag = detectInstaBoost(batches, playerHistory);
+            window.boosterExpiries.set(id, { boosters: boosterObjs, insta: instaFlag });
+            if (instaFlag) instaPlayers.push(id);
+
+            updateBoosterHistory(historyData.history, id, batches);
         }
+
+        finalizeHistory(historyData);
+        finalizeInstaPlayers(CONFIG, opponents, instaPlayers, instaBoostedHistory, historyData);
     }
 
     function applyCautionIcons(historyData, instaPlayers, remainingPlayers, oldInstaBoosters) {
@@ -763,13 +754,17 @@ async function severalLeagues() {
             );
             if (!id) return;
 
-            if (instaPlayers.includes(id)) {
+            const instaSet = new Set(instaPlayers);
+            const oldInstaSet = new Set(oldInstaBoosters);
+            const remainingSet = new Set(remainingPlayers);
+
+            if (instaSet.has(id)) {
                 addCautionIcon(row, id, historyData, 8, true, false);
             }
-            else if (oldInstaBoosters.includes(id)) {
+            else if (oldInstaSet.has(id)) {
                 addCautionIcon(row, id, historyData, 8, false, true);
             }
-            else if (remainingPlayers.includes(id)) {
+            else if (remainingSet.has(id)) {
                 addCautionIcon(row, id, historyData, 8, false, false);
             }
         });
