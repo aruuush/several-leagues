@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.2.11
+// @version      4.3.0
 // @author       arush
 // @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
@@ -1052,7 +1052,33 @@ async function severalLeagues() {
         disableMultiBattleButton();
     }
 
-    // ------------ Sort Persistence ------------
+    function colorMatchScoresInit() {
+
+        function colorMatchScores() {
+            document.querySelectorAll('.data-column[column="match_history_sorting"] .result').forEach(el => {
+                const score = parseInt(el.textContent.trim(), 10);
+                if (isNaN(score)) return;
+
+                if (score === 25) {
+                    el.classList.add('won');
+                    el.classList.remove('lost');
+                } else {
+                    el.classList.add('lost');
+                    el.classList.remove('won');
+                }
+            });
+        }
+
+        colorMatchScores();
+
+        doWhenSelectorAvailable('.data-list', () => {
+            const observer = new MutationObserver(colorMatchScores);
+            observer.observe(document.querySelector('.data-list'), {
+                childList: true,
+                subtree: true
+            });
+        });
+    }
 
     // ------------ Main Execution ------------
     async function loadConfig() {
@@ -1068,6 +1094,8 @@ async function severalLeagues() {
                 { enabled: true, addBoosterInfoForAll: true },
             disableMultiBattleButton:
                 { enabled: true },
+            changeScoreColors:
+                { enabled: false },
         };
 
         // changing config requires HH++
@@ -1219,6 +1247,25 @@ async function severalLeagues() {
         });
         config.disableMultiBattleButton.enabled = false;
 
+        registerModule({
+            group: 'SeveralLeagues',
+            configSchema: {
+                baseKey: 'changeScoreColors',
+                label: `Mark lost points in red
+                        <div style="margin-top:10px; display:flex;flex-direction:column;gap:4px;color:#999DA0;">
+                            <div>- 25 points = Green.</div>
+                            <div>- Otherwise, red.</div>
+                        </div>`,
+                default: false,
+            },
+            run() {
+                config.changeScoreColors = {
+                    enabled: true,
+                };
+            }
+        });
+        config.changeScoreColors.enabled = false;
+
         hhLoadConfig();
         runModules();
 
@@ -1282,6 +1329,10 @@ async function severalLeagues() {
     if (config.sortByBoosterExpiration.enabled) {
         doWhenSelectorAvailable('.data-row.head-row', SortPersistenceInit);
         doWhenSelectorAvailable('.head-column[column="boosters"]', () => sortByBoosterExpirationInit());
+    }
+
+    if (config.changeScoreColors.enabled) {
+        colorMatchScoresInit();
     }
 
     // Global variable for armed state
