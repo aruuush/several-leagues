@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      4.3.0
-// @author       arush
+// @version      5.0.0
+// @author       Arush
 // @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
 // @match        *://*.haremheroes.com/*leagues.html*
@@ -31,6 +31,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
+// @grant        GM.xmlHttpRequest
+// @connect      api.github.com
 // ==/UserScript==
 
 if (unsafeWindow.__severalLeaguesInitialized) {
@@ -97,21 +99,538 @@ async function severalLeagues() {
     const INSTABOOSTER_KEY = `${prefix}_league_instabooster_config`;
     const INSTABOOSTER_PLAYER_HISTORY_KEY = `${prefix}_league_instaboosted_players`;
     const HISTORY_KEY = `${prefix}_league_booster_history`;
+    // GM-local cache: which flagged archived players reappear in the current bracket.
+    const REAPPEARS_KEY = `${prefix}_league_reappears_snapshot`;
+    // GM-local bookkeeping: last-modified time for the synced threshold setting (LWW).
+    const SETTINGS_AT_KEY = `${prefix}_sl_settings_updated_at`;
 
     const INSTABOOSTER_THRESHOLD_DEFAULT = 10; // seconds
     const BATCH_GAP_THRESHOLD = 10; // seconds
+    const MAX_DISPLAY_BATCHES = 8; // tooltip can't show more than this anyway
     let instaBoosterThreshold = GM_getValue(INSTABOOSTER_KEY, INSTABOOSTER_THRESHOLD_DEFAULT);
 
     // ------------ Utility ------------
     const fmt = (ts) =>
         new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
+    // ==================================================================
+    // ===================== GitHub Sync Layer ==========================
+    // ==================================================================
+    // Reuses window.LeagueTrackerGitHubConfig (from the HH League Tracker
+    // config script). If it's missing, every sync call becomes a silent
+    // no-op and the script behaves exactly as it did before this feature.
+    //
+    // Files written (all under the user's own repo):
+    //   several_leagues/<platform>/<myId>/starred.json          (personal stars)
+    //   several_leagues/<platform>/<myId>/booster_history.json  (current-league history)
+    //   several_leagues/<platform>/<myId>/flagged_archive.json  (cross-league watchlist)
+    //
+    // GM-local (never synced): the reappears snapshot cache.
+    // ==================================================================
+    const gitHubSync = createGitHubSync();
+
+    function createGitHubSync() {
+        const cfg = unsafeWindow.LeagueTrackerGitHubConfig;
+        const configPresent = !!(cfg && cfg.owner && cfg.repo && cfg.token);
+
+        if (!configPresent) {
+            console.info('Several Leagues: LeagueTrackerGitHubConfig not found — GitHub sync disabled (local only).');
+        }
+
+        // Runtime master switch, set from the HH++ config toggle after load.
+        // Sync only runs when the config is present AND the toggle is on.
+        const state = { toggleOn: true };
+        const isEnabled = () => configPresent && state.toggleOn;
+
+        const shared = unsafeWindow.shared;
+        const platform = shared?.Hero?.infos?.hh_universe || prefix;
+        const myId = shared?.Hero?.infos?.id ?? 'unknown';
+        const playerName = shared?.Hero?.infos?.name || 'player';
+        const base = `several_leagues/${platform}/${myId}`;
+
+        const PATHS = {
+            starred: `${base}/starred.json`,
+            history: `${base}/booster_history.json`,
+            archive: `${base}/flagged_archive.json`,
+            settings: `${base}/settings.json`,
+        };
+
+        // local bookkeeping for sha handles (never synced, device-local)
+        const SHA = {
+            starred: `${prefix}_sl_sha_starred`,
+            history: `${prefix}_sl_sha_history`,
+            archive: `${prefix}_sl_sha_archive`,
+            settings: `${prefix}_sl_sha_settings`,
+        };
+
+        // ---- base64 <-> JSON, UTF-8 safe ----
+        const encode = (obj) => {
+            const bytes = new TextEncoder().encode(JSON.stringify(obj, null, 2));
+            let bin = '';
+            for (const b of bytes) bin += String.fromCharCode(b);
+            return btoa(bin);
+        };
+        const decode = (b64) => {
+            const bin = atob(String(b64).replace(/\s/g, ''));
+            const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+            return JSON.parse(new TextDecoder().decode(bytes));
+        };
+
+        const url = (path) => `https://api.github.com/repos/${cfg.owner}/${cfg.repo}/contents/${path}`;
+
+        // prefixed logger, mirrors the League Tracker's info()
+        const info = (...args) => console.log('Several Leagues:', ...args);
+
+        async function ghGet(path) {
+            info(`reading ${path}`);
+            const res = await GM.xmlHttpRequest({
+                method: 'GET',
+                url: url(path),
+                headers: {
+                    Accept: 'application/vnd.github+json',
+                    Authorization: `Bearer ${cfg.token}`,
+                    'If-None-Match': '', // dodge GitHub's ETag cache
+                },
+            });
+            if (res.status === 404) { info(`${path} doesn't exist yet`); return { missing: true }; }
+            if (res.status !== 200) throw new Error(`GET ${path} -> ${res.status}`);
+            const body = JSON.parse(res.responseText);
+            return { data: decode(body.content), sha: body.sha };
+        }
+
+        async function ghPut(path, obj, sha, action) {
+            info(`${action} ${path}`);
+            const payload = {
+                message: `${new Date().toISOString()} [${playerName}] ${action} ${path}`,
+                content: encode(obj),
+            };
+            if (sha) payload.sha = sha;
+            const res = await GM.xmlHttpRequest({
+                method: 'PUT',
+                url: url(path),
+                headers: {
+                    Accept: 'application/vnd.github+json',
+                    Authorization: `Bearer ${cfg.token}`,
+                },
+                data: JSON.stringify(payload),
+            });
+            if (res.status !== 200 && res.status !== 201) throw new Error(`PUT ${path} -> ${res.status}`);
+            return JSON.parse(res.responseText).content.sha;
+        }
+
+        // PUT with one automatic sha-refresh on conflict (handles the rare
+        // multi-device collision; single writer means this almost never fires).
+        async function ghPutSafe(path, obj, shaKey, action) {
+            try {
+                const newSha = await ghPut(path, obj, GM_getValue(shaKey, null), action);
+                GM_setValue(shaKey, newSha);
+                return newSha;
+            } catch (e) {
+                const cur = await ghGet(path);
+                const newSha = await ghPut(path, obj, cur.missing ? null : cur.sha, action);
+                GM_setValue(shaKey, newSha);
+                return newSha;
+            }
+        }
+
+        const withTimeout = (p, ms) => Promise.race([p, new Promise(r => setTimeout(() => r({ __timeout: true }), ms))]);
+
+        return { isEnabled, configPresent, state, ghGet, ghPutSafe, PATHS, SHA, withTimeout, info };
+    }
+
+    // ---- batch coercion at the GitHub boundary (defensive) ----
+    // Every batch that crosses into memory from a synced/stored source is
+    // normalized to { id, lifetime:Number } and bad entries are dropped.
+    function coerceBatch(rawBatch) {
+        if (!Array.isArray(rawBatch)) return [];
+        return rawBatch
+            .map(b => (typeof b === 'number'
+                ? { id: null, lifetime: b }
+                : { id: b?.id ?? null, lifetime: Number(b?.lifetime) }))
+            .filter(b => Number.isFinite(b.lifetime));
+    }
+
+    // lifetime-signature of a batch, for dedupe/merge (order-independent)
+    const batchSig = (batch) => batch.map(b => b.lifetime).sort((a, b) => a - b).join(',');
+
+    // ==================================================================
+    // ============= Convert-on-read seam (migrations) ==================
+    // ==================================================================
+    // Single place each structure's persisted data passes through on read.
+    // Today most are identity/passthrough; future shape changes slot in here.
+    // `version ?? 1` is the migration signal for the new structures.
+
+    // STARRED: local key is being canonicalized from a bare array to
+    // { version, updatedAt, starred:[...] }. One-time convert-on-read.
+    function readStarredLocal() {
+        const raw = GM_getValue(STARRED_KEY, null);
+        if (raw == null) {
+            return { version: 1, updatedAt: 0, starred: [] };
+        }
+        // legacy: bare array
+        if (Array.isArray(raw)) {
+            const migrated = { version: 1, updatedAt: Date.now(), starred: raw.map(String) };
+            GM_setValue(STARRED_KEY, migrated);
+            return migrated;
+        }
+        // current wrapped shape (defensive fill)
+        const v = raw.version ?? 1;
+        return {
+            version: v,
+            updatedAt: Number(raw.updatedAt) || 0,
+            starred: Array.isArray(raw.starred) ? raw.starred.map(String) : [],
+        };
+    }
+    function writeStarredLocal(starredArr, updatedAt) {
+        GM_setValue(STARRED_KEY, {
+            version: 1,
+            updatedAt: updatedAt ?? Date.now(),
+            starred: [...new Set(starredArr.map(String))],
+        });
+    }
+
+    // HISTORY: local key canonicalized from { leagueKey, history } to
+    // { version, leagueKey, history }. One-time convert-on-read.
+    function readHistoryLocal() {
+        const raw = GM_getValue(HISTORY_KEY, null);
+        if (raw == null) return { version: 1, leagueKey: null, history: {} };
+        const v = raw.version ?? 1;
+        const out = {
+            version: v,
+            leagueKey: raw.leagueKey ?? null,
+            history: raw.history && typeof raw.history === 'object' ? raw.history : {},
+        };
+        if (raw.version == null) {
+            // stamp version onto legacy shape once
+            GM_setValue(HISTORY_KEY, out);
+        }
+        return out;
+    }
+    function writeHistoryLocal(leagueKey, history) {
+        GM_setValue(HISTORY_KEY, { version: 1, leagueKey, history });
+    }
+
+    // ARCHIVE (remote): { version, players: { id: batches[] } }
+    function migrateArchive(data) {
+        if (!data || typeof data !== 'object') return { version: 1, players: {} };
+        const players = data.players && typeof data.players === 'object' ? data.players : {};
+        const cleaned = {};
+        for (const id in players) {
+            const batches = (Array.isArray(players[id]) ? players[id] : [])
+                .map(coerceBatch)
+                .filter(b => b.length);
+            if (batches.length) cleaned[id] = batches;
+        }
+        return { version: 1, players: cleaned };
+    }
+
+    // REAPPEARS snapshot (GM-local): { version, leagueKey, players: { id: batches[] } }
+    function readReappears(currentLeagueKey) {
+        const raw = GM_getValue(REAPPEARS_KEY, null);
+        if (!raw || typeof raw !== 'object') return null;
+        if (raw.leagueKey !== currentLeagueKey) return null; // stale -> ignore (rebuilt at reset)
+        const players = raw.players && typeof raw.players === 'object' ? raw.players : {};
+        const out = {};
+        for (const id in players) {
+            const batches = (Array.isArray(players[id]) ? players[id] : [])
+                .map(coerceBatch)
+                .filter(b => b.length);
+            if (batches.length) out[id] = batches;
+        }
+        return out;
+    }
+    function writeReappears(leagueKey, players) {
+        GM_setValue(REAPPEARS_KEY, { version: 1, leagueKey, players });
+    }
+
+    // ---- populate the in-memory display seed from the reappears snapshot ----
+    // Reads the GM-local snapshot for the current league and tags each batch
+    // fromArchive:true. Called at collection time and again after a reset fold
+    // rebuilds the snapshot. Never writes into live history.
+    function seedFromReappears() {
+        const reappears = readReappears(server_now_ts + season_end_at) || {};
+        window.__seededArchive = {};
+        for (const id in reappears) {
+            window.__seededArchive[id] = reappears[id].map(batch =>
+                batch.map(b => ({ id: b.id, lifetime: b.lifetime, fromArchive: true }))
+            );
+        }
+    }
+
+    // ---- archive merge: union of batches per player, deduped by signature,
+    //      newest-first, capped to MAX_DISPLAY_BATCHES. Prefers the copy that
+    //      carries real booster ids over a null-id copy. ----
+    function foldBatchesIntoArchive(existingBatches, incomingBatches) {
+        const bySig = new Map();
+        const consider = (batch) => {
+            const b = coerceBatch(batch);
+            if (!b.length) return;
+            const key = batchSig(b);
+            const hasReal = b.some(x => x.id != null);
+            const prev = bySig.get(key);
+            if (!prev || (hasReal && !prev.some(x => x.id != null))) bySig.set(key, b);
+        };
+        (existingBatches || []).forEach(consider);
+        (incomingBatches || []).forEach(consider);
+
+        // newest-first by the batch's latest lifetime, cap to display limit
+        return [...bySig.values()]
+            .sort((a, b) => Math.max(...b.map(x => x.lifetime)) - Math.max(...a.map(x => x.lifetime)))
+            .slice(0, MAX_DISPLAY_BATCHES);
+    }
+
+    // ==================================================================
+    // ==================== Sync operations =============================
+    // ==================================================================
+
+    // ---- STARS (last-write-wins via updatedAt, reconciled on load) ----
+    // Returns true if local stars changed (so rows can be re-decorated).
+    async function syncStars() {
+        if (!gitHubSync.isEnabled()) return false;
+        const local = readStarredLocal();
+
+        let remote;
+        try {
+            remote = await gitHubSync.ghGet(gitHubSync.PATHS.starred);
+        } catch (e) {
+            console.warn('Several Leagues: starred sync failed', e);
+            return false;
+        }
+
+        if (remote.missing) {
+            const at = local.updatedAt || Date.now();
+            writeStarredLocal(local.starred, at);
+            await gitHubSync.ghPutSafe(
+                gitHubSync.PATHS.starred,
+                { version: 1, updatedAt: at, starred: [...new Set(local.starred.map(String))] },
+                gitHubSync.SHA.starred, 'create'
+            );
+            return false;
+        }
+        GM_setValue(gitHubSync.SHA.starred, remote.sha);
+
+        const rd = remote.data || {};
+        const remoteAt = Number(rd.updatedAt) || 0;
+        const remoteArr = Array.isArray(rd.starred) ? rd.starred.map(String)
+            : (Array.isArray(rd) ? rd.map(String) : []); // defensive: bare array remote
+
+        if (remoteAt > local.updatedAt) {
+            writeStarredLocal(remoteArr, remoteAt);
+            return true; // caller re-decorates rows
+        } else if (local.updatedAt > remoteAt) {
+            await gitHubSync.ghPutSafe(
+                gitHubSync.PATHS.starred,
+                { version: 1, updatedAt: local.updatedAt, starred: [...new Set(local.starred.map(String))] },
+                gitHubSync.SHA.starred, 'update'
+            );
+        } else {
+            gitHubSync.info('stars unchanged, no need to update');
+        }
+        return false;
+    }
+
+    // ---- SETTINGS / THRESHOLD (last-write-wins via updatedAt, reconciled on load) ----
+    async function syncSettings() {
+        if (!gitHubSync.isEnabled()) return;
+        const localThreshold = GM_getValue(INSTABOOSTER_KEY, INSTABOOSTER_THRESHOLD_DEFAULT);
+        const localAt = Number(GM_getValue(SETTINGS_AT_KEY, 0)) || 0;
+
+        let remote;
+        try {
+            remote = await gitHubSync.ghGet(gitHubSync.PATHS.settings);
+        } catch (e) {
+            console.warn('Several Leagues: settings sync failed', e);
+            return;
+        }
+
+        if (remote.missing) {
+            const at = localAt || Date.now();
+            GM_setValue(SETTINGS_AT_KEY, at);
+            await gitHubSync.ghPutSafe(
+                gitHubSync.PATHS.settings,
+                { version: 1, updatedAt: at, instaBoosterThreshold: localThreshold },
+                gitHubSync.SHA.settings, 'create'
+            );
+            return;
+        }
+        GM_setValue(gitHubSync.SHA.settings, remote.sha);
+
+        const rd = remote.data || {};
+        const remoteAt = Number(rd.updatedAt) || 0;
+        const remoteThreshold = Number(rd.instaBoosterThreshold);
+
+        if (remoteAt > localAt && Number.isFinite(remoteThreshold)) {
+            GM_setValue(INSTABOOSTER_KEY, remoteThreshold);
+            GM_setValue(SETTINGS_AT_KEY, remoteAt);
+            instaBoosterThreshold = remoteThreshold;
+            // reflect into the config input if it's already rendered
+            const input = document.querySelector('#insta-booster-threshold');
+            if (input) input.value = String(remoteThreshold);
+        } else if (localAt > remoteAt) {
+            await gitHubSync.ghPutSafe(
+                gitHubSync.PATHS.settings,
+                { version: 1, updatedAt: localAt, instaBoosterThreshold: localThreshold },
+                gitHubSync.SHA.settings, 'update'
+            );
+        } else {
+            gitHubSync.info('settings unchanged, no need to update');
+        }
+    }
+
+    // ---- HISTORY (union-merge for cross-device; push only on change) ----
+    async function syncHistory(currentLeagueKey) {
+        if (!gitHubSync.isEnabled()) return;
+        const local = readHistoryLocal();
+        const localHistory = (local.leagueKey === currentLeagueKey && local.history) ? local.history : {};
+
+        let remote;
+        try {
+            remote = await gitHubSync.ghGet(gitHubSync.PATHS.history);
+        } catch (e) {
+            console.warn('Several Leagues: history sync failed', e);
+            return;
+        }
+
+        if (remote.missing) {
+            writeHistoryLocal(currentLeagueKey, localHistory);
+            await gitHubSync.ghPutSafe(
+                gitHubSync.PATHS.history,
+                { version: 1, leagueKey: currentLeagueKey, history: localHistory },
+                gitHubSync.SHA.history, 'create'
+            );
+            return;
+        }
+        GM_setValue(gitHubSync.SHA.history, remote.sha);
+
+        const rd = remote.data || {};
+        // remote is for a different (older) league -> our current-league data wins
+        if (rd.leagueKey !== currentLeagueKey) {
+            writeHistoryLocal(currentLeagueKey, localHistory);
+            await gitHubSync.ghPutSafe(
+                gitHubSync.PATHS.history,
+                { version: 1, leagueKey: currentLeagueKey, history: localHistory },
+                gitHubSync.SHA.history, 'reset'
+            );
+            return;
+        }
+
+        // same league: UNION-merge remote into local so batches seen on either
+        // device survive. Re-read local at merge time (buildBoosterExpiryMap may
+        // have written this page's observations while the pull was in flight).
+        const remoteHistory = rd.history && typeof rd.history === 'object' ? rd.history : {};
+        const freshLocal = readHistoryLocal();
+        const baseHistory = (freshLocal.leagueKey === currentLeagueKey && freshLocal.history) ? freshLocal.history : {};
+
+        const merged = mergeHistoriesUnion(baseHistory, remoteHistory);
+
+        const mergedStr = JSON.stringify(merged);
+        const localDiffers = mergedStr !== JSON.stringify(baseHistory);
+        const remoteDiffers = mergedStr !== JSON.stringify(remoteHistory);
+
+        if (localDiffers) {
+            writeHistoryLocal(currentLeagueKey, merged);
+            if (typeof onHistoryChanged === 'function') onHistoryChanged();
+        }
+        // push if the merged result differs from what remote had
+        if (remoteDiffers) {
+            await gitHubSync.ghPutSafe(
+                gitHubSync.PATHS.history,
+                { version: 1, leagueKey: currentLeagueKey, history: merged },
+                gitHubSync.SHA.history, 'update'
+            );
+        }
+        if (!localDiffers && !remoteDiffers) {
+            gitHubSync.info('history unchanged, no need to update');
+        }
+    }
+
+    // union of two histories: per player, union of batches deduped by lifetime
+    // signature, preferring the copy that carries real booster ids.
+    function mergeHistoriesUnion(a = {}, b = {}) {
+        const out = {};
+        const ids = new Set([...Object.keys(a), ...Object.keys(b)]);
+        for (const id of ids) {
+            const bySig = new Map();
+            const consider = (rawBatch) => {
+                const batch = coerceBatch(rawBatch);
+                if (!batch.length) return;
+                const key = batchSig(batch);
+                const hasReal = batch.some(x => x.id != null);
+                const prev = bySig.get(key);
+                if (!prev || (hasReal && !prev.some(x => x.id != null))) bySig.set(key, batch);
+            };
+            (a[id] || []).forEach(consider);
+            (b[id] || []).forEach(consider);
+            if (bySig.size) out[id] = [...bySig.values()];
+        }
+        return out;
+    }
+
+    // ---- ARCHIVE + REAPPEARS (reset-time fold, then seed on every load) ----
+    // Called at reset detection, BEFORE the live history is wiped. `outgoing`
+    // is last league's flagged players => { id: batches[] }. Roster is this
+    // league's opponent ids. Returns nothing; writes archive to GitHub and the
+    // reappears snapshot to GM storage.
+    async function foldAndBuildReappears(currentLeagueKey, outgoingFlagged, rosterIds) {
+        if (!gitHubSync.isEnabled()) {
+            // still build a local reappears snapshot from... nothing remote.
+            // Without sync there's no archive, so no cross-league seeding.
+            writeReappears(currentLeagueKey, {});
+            return;
+        }
+
+        let archive = { version: 1, players: {} };
+        try {
+            const remote = await gitHubSync.ghGet(gitHubSync.PATHS.archive);
+            if (remote.missing) {
+                archive = { version: 1, players: {} };
+            } else {
+                GM_setValue(gitHubSync.SHA.archive, remote.sha);
+                archive = migrateArchive(remote.data);
+            }
+        } catch (e) {
+            console.warn('Several Leagues: archive pull failed; skipping fold this reset', e);
+            writeReappears(currentLeagueKey, {});
+            return;
+        }
+
+        // fold outgoing flagged players into the archive
+        let changed = false;
+        for (const id in outgoingFlagged) {
+            const incoming = outgoingFlagged[id];
+            if (!incoming || !incoming.length) continue;
+            const before = archive.players[id] || [];
+            const folded = foldBatchesIntoArchive(before, incoming);
+            if (JSON.stringify(folded) !== JSON.stringify(before)) changed = true;
+            archive.players[id] = folded;
+        }
+
+        if (changed) {
+            try {
+                await gitHubSync.ghPutSafe(
+                    gitHubSync.PATHS.archive, archive, gitHubSync.SHA.archive, 'update'
+                );
+            } catch (e) {
+                console.warn('Several Leagues: archive push failed', e);
+            }
+        } else {
+            gitHubSync.info('archive unchanged, no need to update');
+        }
+
+        // build reappears = archive ∩ current roster
+        const rosterSet = new Set(rosterIds.map(String));
+        const players = {};
+        for (const id in archive.players) {
+            if (rosterSet.has(String(id))) players[id] = archive.players[id];
+        }
+        writeReappears(currentLeagueKey, players);
+    }
+
     // ------------ Star League Players ------------
     function starInit() {
         function loadStarred() {
             try {
-                const raw = GM_getValue(STARRED_KEY, []);
-                return new Set(raw);
+                return new Set(readStarredLocal().starred);
             } catch (e) {
                 console.error('Several Leagues: Failed to load starred players', e);
                 return new Set();
@@ -120,7 +639,9 @@ async function severalLeagues() {
 
         function saveStarred(set) {
             try {
-                GM_setValue(STARRED_KEY, [...set]);
+                // Local only — bumps updatedAt so the next load's reconcile
+                // knows local is newer and pushes it. No push on toggle.
+                writeStarredLocal([...set], Date.now());
             } catch (e) {
                 console.error('Several Leagues: Failed to save starred players', e);
             }
@@ -328,6 +849,24 @@ async function severalLeagues() {
 
         const target = document.querySelector('.data-list') || document.body;
         observer.observe(target, { childList: true, subtree: true });
+
+        // Let a background stars pull repaint: re-read local (updated by the
+        // pull), sync the in-memory set in place, refresh the star icons.
+        starReDecorate = () => {
+            const latest = new Set(readStarredLocal().starred);
+            starredSet.clear();
+            latest.forEach(id => starredSet.add(id));
+            // repaint existing star toggles
+            document.querySelectorAll('.data-row.body-row').forEach(row => {
+                const nickSpan = row.querySelector('.data-column[column="nickname"] .nickname[id-member]');
+                const el = row.querySelector('.hh-star-toggle');
+                if (!nickSpan || !el || row.classList.contains('player-row')) return;
+                const id = nickSpan.getAttribute('id-member');
+                updateStarVisual(el, starredSet.has(id));
+            });
+            const mode = GM_getValue(FILTER_MODE_KEY, 'all');
+            applyModeFilter(starredSet, mode);
+        };
     }
 
     // ------------ Build Booster Map and InstaBooster Detection ------------
@@ -346,10 +885,14 @@ async function severalLeagues() {
         }
 
         function boosterExistsInBatch(booster, index) {
-            return (
-                (booster.id != null && index.byId.has(booster.id)) ||
-                index.byTime.has(booster.lifetime)
-            );
+            // A booster's identity is its equipped id. Two different boosters
+            // (e.g. an old expiring one and a freshly re-equipped one) can share
+            // a lifetime but are NOT the same booster. Only fall back to matching
+            // by time when the id is missing on this side (legacy/partial data).
+            if (booster.id != null) {
+                return index.byId.has(booster.id);
+            }
+            return index.byTime.has(booster.lifetime);
         }
 
         function isBatchSubset(oldBatch, newIndex) {
@@ -376,41 +919,21 @@ async function severalLeagues() {
         }
 
         function loadHistory() {
-            const data = GM_getValue(HISTORY_KEY, {});
+            const stored = readHistoryLocal();
             const currentLeagueKey = server_now_ts + season_end_at;
 
-            if (!data) return { leagueKey: currentLeagueKey, history: {} };
-
-            try {
-                if (data.leagueKey !== currentLeagueKey) {
-                    GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []);
-                    return { leagueKey: currentLeagueKey, history: {} };
-                }
-                return data;
-            } catch {
+            if (stored.leagueKey !== currentLeagueKey) {
+                // League changed (or first ever). The reset FOLD is handled
+                // separately (before this runs) in the main flow; here we just
+                // return an empty current-league history to accumulate into.
                 GM_setValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []);
                 return { leagueKey: currentLeagueKey, history: {} };
             }
+            return { leagueKey: currentLeagueKey, history: stored.history || {} };
         }
 
         function saveHistory(data) {
-            GM_setValue(HISTORY_KEY, data);
-        }
-
-        function normalizeHistory(history) {
-            const normalized = {};
-
-            for (const playerId in history) {
-                normalized[playerId] = (history[playerId] || []).map(batch =>
-                    batch.map(b =>
-                        typeof b === "number"
-                            ? { id: null, lifetime: b }
-                            : { id: b.id ?? null, lifetime: Number(b.lifetime) }
-                    )
-                );
-            }
-
-            return normalized;
+            writeHistoryLocal(data.leagueKey, data.history);
         }
 
         function dedupeHistory(history) {
@@ -462,13 +985,10 @@ async function severalLeagues() {
             return cleaned;
         }
 
-        function loadAndNormalizeHistory() {
+        function loadAndCleanHistory() {
             const historyData = loadHistory();
-
-            historyData.history = dedupeHistory(
-                normalizeHistory(historyData.history || {})
-            );
-
+            // batches are already object-shaped ({id, lifetime}); just dedupe.
+            historyData.history = dedupeHistory(historyData.history || {});
             return historyData;
         }
 
@@ -547,12 +1067,15 @@ async function severalLeagues() {
 
                 for (let i = storedBatches.length - 1; i >= 0; i--) {
                     const oldBatch = storedBatches[i];
-                    const subset = isBatchSubset(oldBatch, newIndex);
-                    const sameContent = subset && oldBatch.length === newBatch.length;
+                    const oldIndex = makeBatchIndex(oldBatch);
+                    const oldInNew = isBatchSubset(oldBatch, newIndex); // old ⊆ new
+                    const newInOld = isBatchSubset(newBatch, oldIndex); // new ⊆ old
+                    const sameContent = oldInNew && oldBatch.length === newBatch.length;
 
                     const { hasNull } = batchIdState(oldBatch);
 
                     if (sameContent && hasNull && hasReal) {
+                        // same batch, new copy has real ids -> replace
                         storedBatches.splice(i, 1);
                         continue;
                     }
@@ -562,7 +1085,16 @@ async function severalLeagues() {
                         break;
                     }
 
-                    if (subset) storedBatches.splice(i, 1);
+                    // new batch is a partial view of a fuller stored batch:
+                    // it's already covered, don't store the partial duplicate.
+                    if (newInOld && newBatch.length < oldBatch.length) {
+                        exists = true;
+                        break;
+                    }
+
+                    // old batch is a partial view of the fuller new batch:
+                    // drop the partial, the new fuller one will be stored.
+                    if (oldInNew) storedBatches.splice(i, 1);
                 }
 
                 if (!exists) storedBatches.push(newBatch);
@@ -571,11 +1103,9 @@ async function severalLeagues() {
 
         function finalizeHistory(historyData) {
             const leagueKey = server_now_ts + season_end_at;
-
-            saveHistory({
-                leagueKey,
-                history: historyData.history
-            });
+            saveHistory({ leagueKey, history: historyData.history });
+            // Push happens in the background reconcile (syncHistory), which
+            // union-merges and pushes only if the result differs from remote.
         }
 
         function finalizeInstaPlayers(CONFIG, opponents, instaPlayers, instaBoostedHistory, historyData) {
@@ -616,7 +1146,14 @@ async function severalLeagues() {
 
         const opponents = Array.isArray(opponents_list) ? opponents_list : [];
 
-        const historyData = loadAndNormalizeHistory();
+        const historyData = loadAndCleanHistory();
+
+        // ---- Seed archived batches (reappearing flagged players) into the
+        //      in-memory display layer so their ⚠️ + PAST LEAGUE tooltip show
+        //      from day 1. Tagged fromArchive:true; NEVER saved into live
+        //      history (kept out of detection + storage). ----
+        seedFromReappears();
+
         window.boosterExpiries = new Map();
 
         const instaPlayers = [];
@@ -625,7 +1162,7 @@ async function severalLeagues() {
         for (const opp of opponents) {
             const id = opp.player.id_fighter;
             const boosterObjs = extractBoosters(opp.boosters);
-            
+
             if (!boosterObjs.length) continue;
 
             const batches = buildBoosterBatches(boosterObjs);
@@ -639,13 +1176,18 @@ async function severalLeagues() {
 
         finalizeHistory(historyData);
         finalizeInstaPlayers(CONFIG, opponents, instaPlayers, instaBoostedHistory, historyData);
+
+        // local history for this load is now written; unblock the background merge
+        if (typeof resolveCollectionDone === 'function') resolveCollectionDone();
     }
 
     function applyCautionIcons(historyData, instaPlayers, remainingPlayers, oldInstaBoosters) {
 
-        function addCautionIcon(row, playerId, historyData, maxBatches = 8, insta = true, oldInsta = false) {
-            const playerHistory = historyData[playerId];
-            if (!playerHistory || !playerHistory.length) return;
+        function addCautionIcon(row, playerId, historyData, maxBatches = MAX_DISPLAY_BATCHES, insta = true, oldInsta = false) {
+            const liveHistory = historyData[playerId] || [];
+            const archivedHistory = (window.__seededArchive && window.__seededArchive[playerId]) || [];
+
+            if (!liveHistory.length && !archivedHistory.length) return;
 
             const nickCell = row.querySelector('.data-column[column="nickname"]');
             if (!nickCell || nickCell.querySelector('.hh-caution')) return;
@@ -666,9 +1208,14 @@ async function severalLeagues() {
             } else {
                 colors = ['#70b8ffff', '#629ff9ff', '#3f81fbff', '#2461fdff'];
             }
+            // dimmer palette for the PAST LEAGUE section
+            const pastColors = ['#b9741e', '#a8631a', '#985616', '#8a4c13'];
 
-            const lastBatches = playerHistory.slice(-maxBatches);
-            const batchTexts = lastBatches.map((batch, index) => {
+            // ---- LIVE (this league) batches: numbered 1..n, cap to maxBatches.
+            //      Live batches are never evicted by the cap; archived fill the
+            //      remaining slots. ----
+            const liveSlice = liveHistory.slice(-maxBatches);
+            const liveTexts = liveSlice.map((batch, index) => {
                 const times = batch.map(b => fmt(b.lifetime)).join(', ');
                 return `<div style="color:${colors[index % colors.length]}; margin-bottom:4px;">
                     <strong>Batch ${index + 1}:</strong>
@@ -676,15 +1223,39 @@ async function severalLeagues() {
                 </div>`;
             });
 
+            // remaining slots for PAST LEAGUE
+            const remainingSlots = Math.max(0, maxBatches - liveSlice.length);
+            const pastSlice = remainingSlots ? archivedHistory.slice(0, remainingSlots) : [];
+            const pastTexts = pastSlice.map((batch, index) => {
+                const times = batch.map(b => fmt(b.lifetime)).join(', ');
+                return `<div style="color:${pastColors[index % pastColors.length]}; margin-bottom:4px;">
+                    <strong>Batch ${index + 1}:</strong>
+                    <span style="color:${pastColors[index % pastColors.length]}; padding-left:10px;">${times}</span>
+                </div>`;
+            });
+
             const tooltip = document.createElement('div');
             tooltip.className = 'hh-caution-tooltip';
+
+            let header;
             if (insta) {
-                tooltip.innerHTML = `<div style="margin-bottom:6px; color:#ff3300ff; font-size: 1rem;">INSTABOOSTER Detected</div>${batchTexts.join('')}`;
+                header = `<div style="margin-bottom:6px; color:#ff3300ff; font-size: 1rem;">INSTABOOSTER Detected</div>`;
             } else if (oldInsta) {
-                tooltip.innerHTML = `<div style="margin-bottom:6px; color:#ff3300ff; font-size: 1rem;">Former INSTABOOSTER</div>${batchTexts.join('')}`;
+                header = `<div style="margin-bottom:6px; color:#ff3300ff; font-size: 1rem;">Former INSTABOOSTER</div>`;
             } else {
-                tooltip.innerHTML = `<div style="margin-bottom:6px; color:#185affff; font-size: 1rem;">Booster History</div>${batchTexts.join('')}`;
+                header = `<div style="margin-bottom:6px; color:#185affff; font-size: 1rem;">Booster History</div>`;
             }
+
+            let html = header + liveTexts.join('');
+
+            // PAST LEAGUE section only if there's at least one archived batch shown
+            if (pastTexts.length) {
+                html += `<div style="margin:8px 0 4px; color:#c98a3a; font-size:0.85rem; opacity:0.85; border-top:1px solid rgba(255,255,255,0.15); padding-top:6px;">PAST LEAGUE</div>`;
+                html += `<div style="opacity:0.6;">${pastTexts.join('')}</div>`;
+            }
+
+            tooltip.innerHTML = html;
+
             Object.assign(tooltip.style, {
                 position: 'absolute',
                 background: 'rgba(0,0,0,0.9)',
@@ -748,6 +1319,8 @@ async function severalLeagues() {
             nickCell.appendChild(icon);
         }
 
+        const seeded = window.__seededArchive || {};
+
         document.querySelectorAll('.data-row.body-row').forEach(row => {
             const id = Number(
                 row.querySelector('.nickname[id-member]')?.getAttribute('id-member')
@@ -758,14 +1331,18 @@ async function severalLeagues() {
             const oldInstaSet = new Set(oldInstaBoosters);
             const remainingSet = new Set(remainingPlayers);
 
+            // A player only in the archive (reappearing flagged player) shows as
+            // Former INSTABOOSTER from day 1, even before any live detection.
+            const inArchive = !!seeded[id] && seeded[id].length;
+
             if (instaSet.has(id)) {
-                addCautionIcon(row, id, historyData, 8, true, false);
+                addCautionIcon(row, id, historyData, MAX_DISPLAY_BATCHES, true, false);
             }
-            else if (oldInstaSet.has(id)) {
-                addCautionIcon(row, id, historyData, 8, false, true);
+            else if (oldInstaSet.has(id) || inArchive) {
+                addCautionIcon(row, id, historyData, MAX_DISPLAY_BATCHES, false, true);
             }
             else if (remainingSet.has(id)) {
-                addCautionIcon(row, id, historyData, 8, false, false);
+                addCautionIcon(row, id, historyData, MAX_DISPLAY_BATCHES, false, false);
             }
         });
     }
@@ -1096,6 +1673,8 @@ async function severalLeagues() {
                 { enabled: true },
             changeScoreColors:
                 { enabled: false },
+            githubSync:
+                { enabled: true },
         };
 
         // changing config requires HH++
@@ -1130,6 +1709,7 @@ async function severalLeagues() {
                         <div style="margin-top:10px; display:flex;flex-direction:column;gap:4px;color:#999DA0;">
                             <div>- Stars are persistent accross leagues</div>
                             <div>- Filter is added to HH++ league filter</div>
+                            <div>- Synced to GitHub if League Tracker config is present</div>
                         </div>
                         `,
                 default: true,
@@ -1166,7 +1746,7 @@ async function severalLeagues() {
             group: 'SeveralLeagues',
             configSchema: {
                 baseKey: 'addInstaBoosterDetection',
-                label: `INSTABOOSTER detection <br>
+                label: `Instabooster detection <br>
                         <div style="margin:10px 0px;display:flex;align-items:center;gap:4px;">
                             <label style="width:70px">Threshold:</label>
                             <input type="text" id="insta-booster-threshold" style="text-align:center;height:1rem;width:2.5rem">
@@ -1176,6 +1756,7 @@ async function severalLeagues() {
                             <div>- ⚠️ icon beside player names.</div>
                             <div>- Hover over icon to see recent booster history.</div>
                             <div>- Stays flagged even if they stop insta boosting (Slightly Transparent).</div>
+                            <div>- Reappearing flagged players show PAST LEAGUE history from day 1 (if syncing).</div>
                             <div>- Resets everything on League reset.</div>
                             <div>- Right click icon to hide it.</div>
                         </div>`,
@@ -1202,7 +1783,12 @@ async function severalLeagues() {
             input.value = threshold.toString();
             input.addEventListener('focusout', () => {
                 const inputValue = parseFloat(input.value);
-                threshold = isNaN(inputValue) ? INSTABOOSTER_THRESHOLD_DEFAULT : Math.min(3000, Math.max(0, inputValue));
+                const newThreshold = isNaN(inputValue) ? INSTABOOSTER_THRESHOLD_DEFAULT : Math.min(3000, Math.max(0, inputValue));
+                if (newThreshold !== threshold) {
+                    // mark settings changed so the next load reconcile pushes it
+                    GM_setValue(SETTINGS_AT_KEY, Date.now());
+                }
+                threshold = newThreshold;
                 GM_setValue(INSTABOOSTER_KEY, threshold);
                 instaBoosterThreshold = threshold;
                 input.value = threshold.toString();
@@ -1266,38 +1852,33 @@ async function severalLeagues() {
         });
         config.changeScoreColors.enabled = false;
 
+        registerModule({
+            group: 'SeveralLeagues',
+            configSchema: {
+                baseKey: 'githubSync',
+                label: `Sync to GitHub
+                        <div style="margin-top:10px; display:flex;flex-direction:column;gap:4px;color:#999DA0;">
+                            <div>- Syncs stars, booster history &amp; threshold across devices.</div>
+                            <div>- Reuses the HH League Tracker's GitHub config. Local if absent.</div>
+                        </div>`,
+                default: false,
+            },
+            run() {
+                config.githubSync = {
+                    enabled: true,
+                };
+            }
+        });
+        config.githubSync.enabled = false;
+
         hhLoadConfig();
         runModules();
 
+        // apply the toggle to the sync layer's master switch
+        gitHubSync.state.toggleOn = !!config.githubSync.enabled;
+
         return config;
     }
-
-    // Transfer localStorage to GM storage (one-time)
-    try {
-        const STARRED_VALS = localStorage.getItem(STARRED_KEY);
-        if (STARRED_VALS !== null && STARRED_VALS !== undefined) {
-            GM_setValue(STARRED_KEY, JSON.parse(STARRED_VALS));
-            localStorage.removeItem(STARRED_KEY);
-        }
-        const FILTER_MODE_VAL = localStorage.getItem(FILTER_MODE_KEY);
-        if (FILTER_MODE_VAL !== null && FILTER_MODE_VAL !== undefined) {
-            GM_setValue(FILTER_MODE_KEY, FILTER_MODE_VAL);
-            localStorage.removeItem(FILTER_MODE_KEY);
-        }
-        const SORT_STATE_VAL = localStorage.getItem(SORT_KEY);
-        if (SORT_STATE_VAL !== null && SORT_STATE_VAL !== undefined) {
-            GM_setValue(SORT_KEY, JSON.parse(SORT_STATE_VAL));
-            localStorage.removeItem(SORT_KEY);
-        }
-        const BOOSTER_HISTORY_VAL = localStorage.getItem('boosterHistory');
-        if (BOOSTER_HISTORY_VAL !== null && BOOSTER_HISTORY_VAL !== undefined) {
-            GM_setValue('boosterHistory', BOOSTER_HISTORY_VAL);
-            localStorage.removeItem('boosterHistory');
-        }
-    } catch (e) {
-        console.error('Several Leagues: Failed to transfer data from localStorage to GM storage', e);
-    }
-
 
     const {
         HHPlusPlus: {
@@ -1314,11 +1895,117 @@ async function severalLeagues() {
         return;
     }
 
+    // ==================================================================
+    // ===== Sync: render from local first, reconcile in background =====
+    // ==================================================================
+    // The UI renders immediately from local GM storage (as fast as the old
+    // script). All GitHub traffic happens in a background task that patches
+    // the UI if newer data arrives. Everything reconciles on load — there are
+    // no action-triggered pushes.
+    //
+    // One ordering constraint survives: at a league reset, last league's
+    // flagged players must be captured BEFORE buildBoosterExpiryMap runs (it
+    // clears the flagged-id list and wipes history). So we snapshot that data
+    // synchronously here, then the background task folds it into the archive.
+
+    const currentLeagueKey = server_now_ts + season_end_at;
+
+    // Resolves once buildBoosterExpiryMap has written this load's observations
+    // to local history, so the background history merge runs on top of them
+    // (avoids a read-read-write race that could drop either side's batches).
+    let resolveCollectionDone;
+    const collectionDone = new Promise(res => { resolveCollectionDone = res; });
+    const collectionWillRun = config.addInstaBoosterDetection.enabled
+        || config.localBoosterExpiration.enabled
+        || gitHubSync.isEnabled();
+    if (!collectionWillRun) resolveCollectionDone();
+
+    // Re-render hook: lets a background history merge repaint caution icons.
+    function onHistoryChanged() {
+        if (!config.addInstaBoosterDetection.enabled) return;
+        if (!window.__instaBoosterCache) return;
+        const cache = window.__instaBoosterCache;
+        // refresh the in-memory history reference to the freshly merged copy
+        const fresh = readHistoryLocal();
+        if (fresh.leagueKey === currentLeagueKey) cache.historyData = fresh.history;
+        applyCautionIcons(
+            cache.historyData, cache.instaPlayers,
+            window.__remainingBoosterPlayers, window.__oldInstaBoosters
+        );
+    }
+
+    // ---- Synchronous reset capture (no network) ----
+    (function captureResetSnapshot() {
+        const stored = readHistoryLocal();
+        window.__slReset = { isReset: stored.leagueKey !== currentLeagueKey, outgoingFlagged: {}, roster: [] };
+        if (!window.__slReset.isReset) return;
+
+        const flaggedIds = new Set(
+            (GM_getValue(INSTABOOSTER_PLAYER_HISTORY_KEY, []) || []).map(String)
+        );
+        const outgoingHistory = (stored.history && typeof stored.history === 'object') ? stored.history : {};
+        for (const id in outgoingHistory) {
+            if (flaggedIds.has(String(id))) {
+                const batches = (outgoingHistory[id] || []).map(coerceBatch).filter(b => b.length);
+                if (batches.length) window.__slReset.outgoingFlagged[id] = batches;
+            }
+        }
+        window.__slReset.roster = (Array.isArray(opponents_list) ? opponents_list : [])
+            .map(o => o.player.id_fighter);
+    })();
+
+    // ---- Background reconcile (fire-and-forget; never blocks rendering) ----
+    async function syncBackground() {
+        if (!gitHubSync.isEnabled()) return;
+
+        // reset fold FIRST (builds the reappears snapshot other loads seed from).
+        if (window.__slReset && window.__slReset.isReset) {
+            try {
+                await gitHubSync.withTimeout(
+                    foldAndBuildReappears(currentLeagueKey, window.__slReset.outgoingFlagged, window.__slReset.roster),
+                    10000
+                );
+                // snapshot for THIS league now exists — seed + repaint so the
+                // day-1 PAST LEAGUE flags appear on this reset load, not next.
+                seedFromReappears();
+                if (config.addInstaBoosterDetection.enabled && window.__instaBoosterCache) {
+                    const c = window.__instaBoosterCache;
+                    applyCautionIcons(c.historyData, c.instaPlayers,
+                        window.__remainingBoosterPlayers, window.__oldInstaBoosters);
+                }
+            } catch (e) { console.warn('Several Leagues: fold/reappears failed', e); }
+        }
+
+        // stars, settings, history run concurrently (independent files).
+        const starsP = gitHubSync.withTimeout(syncStars(), 8000)
+            .then(changed => { if (changed && starReDecorate) starReDecorate(); })
+            .catch(e => console.warn('Several Leagues: stars sync failed', e));
+
+        const settingsP = gitHubSync.withTimeout(syncSettings(), 8000)
+            .catch(e => console.warn('Several Leagues: settings sync failed', e));
+
+        // history merge waits until this load's observations are written locally,
+        // so the union-merge runs on top of them (with a safety cap so it can't
+        // hang if collection never signals).
+        const historyP = Promise.race([
+            collectionDone,
+            new Promise(res => setTimeout(res, 6000)),
+        ]).then(() => gitHubSync.withTimeout(syncHistory(currentLeagueKey), 8000))
+          .catch(e => console.warn('Several Leagues: history sync failed', e));
+
+        await Promise.allSettled([starsP, settingsP, historyP]);
+    }
+
+    // hook the star-list re-decorator (set by starInit so background pulls repaint)
+    let starReDecorate = null;
+
     if (config.starLeague.enabled) {
         doWhenSelectorAvailable('.data-column.head-column[column="level"]', starInit);
     }
 
-    if (config.addInstaBoosterDetection.enabled || config.localBoosterExpiration.enabled) {
+    if (config.addInstaBoosterDetection.enabled || config.localBoosterExpiration.enabled || gitHubSync.isEnabled()) {
+        // Collection runs if display OR local-timer OR sync is on, so a device
+        // with detection off still records + syncs booster history.
         doWhenSelectorAvailable('.data-list .data-row.body-row', () => buildBoosterExpiryMap(config));
     }
 
@@ -1365,6 +2052,8 @@ async function severalLeagues() {
             subtree: true
         });
     });
+
+    syncBackground();
 }
 
 waitForHHPlusPlus(() => {
