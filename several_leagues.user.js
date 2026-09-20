@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Several Leagues
 // @namespace    hh-several-leagues
-// @version      5.0.0
-// @author       Arush
+// @version      5.0.1
+// @author       arush
 // @description  Several League enhancements (Only Tested on Hentai Heroes)
 // @match        *://*.hentaiheroes.com/*leagues.html*
 // @match        *://*.haremheroes.com/*leagues.html*
@@ -1214,7 +1214,13 @@ async function severalLeagues() {
             // ---- LIVE (this league) batches: numbered 1..n, cap to maxBatches.
             //      Live batches are never evicted by the cap; archived fill the
             //      remaining slots. ----
-            const liveSlice = liveHistory.slice(-maxBatches);
+            // sort batches chronologically (by the batch's expiry time) so the
+            // most recent is last and "Batch N" numbering reflects real order.
+            const batchTime = (batch) => Math.max(...batch.map(b => b.lifetime));
+            const liveSorted = [...liveHistory].sort((a, b) => batchTime(a) - batchTime(b));
+
+            // keep the most recent maxBatches (from the end after sorting)
+            const liveSlice = liveSorted.slice(-maxBatches);
             const liveTexts = liveSlice.map((batch, index) => {
                 const times = batch.map(b => fmt(b.lifetime)).join(', ');
                 return `<div style="color:${colors[index % colors.length]}; margin-bottom:4px;">
@@ -1223,9 +1229,11 @@ async function severalLeagues() {
                 </div>`;
             });
 
-            // remaining slots for PAST LEAGUE
+            // remaining slots for PAST LEAGUE (archived already newest-first;
+            // show oldest-first here for consistent chronological reading)
             const remainingSlots = Math.max(0, maxBatches - liveSlice.length);
-            const pastSlice = remainingSlots ? archivedHistory.slice(0, remainingSlots) : [];
+            const pastSorted = [...archivedHistory].sort((a, b) => batchTime(a) - batchTime(b));
+            const pastSlice = remainingSlots ? pastSorted.slice(-remainingSlots) : [];
             const pastTexts = pastSlice.map((batch, index) => {
                 const times = batch.map(b => fmt(b.lifetime)).join(', ');
                 return `<div style="color:${pastColors[index % pastColors.length]}; margin-bottom:4px;">
@@ -1746,7 +1754,7 @@ async function severalLeagues() {
             group: 'SeveralLeagues',
             configSchema: {
                 baseKey: 'addInstaBoosterDetection',
-                label: `Instabooster detection <br>
+                label: `INSTABOOSTER detection <br>
                         <div style="margin:10px 0px;display:flex;align-items:center;gap:4px;">
                             <label style="width:70px">Threshold:</label>
                             <input type="text" id="insta-booster-threshold" style="text-align:center;height:1rem;width:2.5rem">
@@ -1756,7 +1764,7 @@ async function severalLeagues() {
                             <div>- ⚠️ icon beside player names.</div>
                             <div>- Hover over icon to see recent booster history.</div>
                             <div>- Stays flagged even if they stop insta boosting (Slightly Transparent).</div>
-                            <div>- Reappearing flagged players show PAST LEAGUE history from day 1 (if syncing).</div>
+                            <div>- Reappearing flagged players show PAST LEAGUE history from day 1 (synced).</div>
                             <div>- Resets everything on League reset.</div>
                             <div>- Right click icon to hide it.</div>
                         </div>`,
@@ -1859,9 +1867,11 @@ async function severalLeagues() {
                 label: `Sync to GitHub
                         <div style="margin-top:10px; display:flex;flex-direction:column;gap:4px;color:#999DA0;">
                             <div>- Syncs stars, booster history &amp; threshold across devices.</div>
-                            <div>- Reuses the HH League Tracker's GitHub config. Local if absent.</div>
+                            <div>- Reuses the HH League Tracker's GitHub config (owner/repo/token).</div>
+                            <div>- Needs that config script present; otherwise stays local.</div>
+                            <div>- Runs in the background; never blocks the page.</div>
                         </div>`,
-                default: false,
+                default: true,
             },
             run() {
                 config.githubSync = {
@@ -2053,6 +2063,7 @@ async function severalLeagues() {
         });
     });
 
+    // kick off background sync WITHOUT awaiting — UI is already rendering.
     syncBackground();
 }
 
